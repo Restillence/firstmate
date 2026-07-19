@@ -113,6 +113,11 @@ catch-up if present), a tmux status-line flash when applicable, and a configurab
 `docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
+**Verify the primary harness's composer shape before relying on afk injection.**
+The composer guard admits only the four structural shapes `fm_backend_herdr_composer_state` and its tmux equivalent recognize: bordered, bare (`❯`/`›`), Pi-separator, and opencode-left-bar.
+A primary harness whose composer shape is outside that set reads `unknown` on every tick, so afk injection defers forever and the wedge alarm is the only signal - exactly the 2026-07-07 claude, 2026-07-08 codex, 2026-07-14 Pi, and 2026-07-19 opencode incidents.
+Before the captain relies on afk injection on herdr (or tmux), verify the primary harness's idle composer reads `empty` from `fm_backend_composer_state "<backend>" "<target>"` (or the tmux equivalent); record the verified shape in `.agents/skills/harness-adapters/SKILL.md` and add a regression fixture in `tests/fm-backend-herdr.test.sh` so a future opencode-shape change cannot silently re-wedge.
+
 ## Submit model
 
 The digest is typed **once** (`send-keys -l` on tmux, `pane send-text` on

@@ -1760,7 +1760,7 @@ fm_backend_herdr_strip_ansi() {  # <text>
 # fm_backend_herdr_composer_state: classify the composer's own row as
 # empty|pending|unknown, scanning a generous tail-window capture of <target>.
 # herdr's CLI exposes no cursor-row primitive (unlike tmux's #{cursor_y}), so
-# this locates the composer structurally, recognizing THREE shapes and keeping
+# this locates the composer structurally, recognizing FOUR shapes and keeping
 # whichever match comes LAST (scanning forward), so a shape earlier in
 # scrollback/a popup can never outrank the real (bottom-anchored) composer:
 #
@@ -1798,6 +1798,18 @@ fm_backend_herdr_strip_ansi() {  # <text>
 #              pair remains unknown. This identity + structure conjunction is
 #              what makes a blank Pi row safe without weakening dead-shell or
 #              ambiguous-pane refusal.
+#   opencode-left-bar - opencode's TUI composer is a run of rows whose trimmed
+#              plain text starts with the heavy vertical `┃` (U+2503), with NO
+#              right border and NO prompt glyph (verified real opencode 1.17.x
+#              under herdr 0.7.x, docs/herdr-backend.md "Incident (2026-07-19)").
+#              opencode paints a status chrome row (`┃  Build · <model>`) as
+#              the LAST row of the run, which the finder excludes before
+#              classification. This shape is accepted ONLY when Herdr's native
+#              `agent get` identifies the target as opencode and reports it
+#              idle, done, or blocked. A working opencode keeps the existing
+#              unknown verdict, preserving the never-inject-into-busy-pane
+#              contract; a non-opencode identity, an over-tall candidate, or a
+#              run with no content rows remains unknown.
 #
 #   empty   - blank, a bare prompt glyph, known ghost/placeholder text
 #             ("Type a message...", verified grok 0.2.82's empty-composer
@@ -1836,6 +1848,10 @@ FM_BACKEND_HERDR_BARE_PROMPT_RE=${FM_BACKEND_HERDR_BARE_PROMPT_RE:-'^[❯›]'}
 # structural candidate so two unrelated transcript rules with an arbitrarily
 # large region between them can never be promoted into a composer.
 FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_PI_COMPOSER_MAX_LINES:-8}
+# opencode's composer is a run of rows whose trimmed plain text starts with the
+# heavy vertical `┃` (U+2503) - a left-only border with no right border and no
+# prompt glyph. Bound the structural candidate the same way Pi is bounded.
+FM_BACKEND_HERDR_OPENCODE_COMPOSER_MAX_LINES=${FM_BACKEND_HERDR_OPENCODE_COMPOSER_MAX_LINES:-8}
 
 fm_backend_herdr_pi_separator_row() {  # <plain-row>
   local row=$1
@@ -1890,6 +1906,117 @@ fm_backend_herdr_pi_composer_find() {  # <ansi-capture>
   done <<EOF
 $cap
 EOF
+}
+
+# An opencode composer row's TRIMMED plain text starts with the heavy vertical
+# `┃` (U+2503). opencode's TUI draws its composer with a LEFT-ONLY heavy vertical
+# border - no right border, no prompt glyph - so a composer row is either
+# exactly `┃` (an empty input line) or `┃ <text>` (typed input or status chrome).
+# See docs/herdr-backend.md "Incident (2026-07-19)" for the byte-level capture.
+fm_backend_herdr_opencode_composer_row() {  # <plain-row>
+  local row=$1
+  row="${row#"${row%%[![:space:]]*}"}"
+  row="${row%"${row##*[![:space:]]}"}"
+  case "$row" in
+    ┃|┃\ *) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# opencode paints a status chrome row INSIDE the composer box - `<left bar>
+# Build · <model>` - which survives the shared ghost stripper (the "Build" run's
+# truecolor foreground is too bright for the dark-foreground cutoff, so the
+# shared owner keeps it as real content). Recognize the chrome signature - a
+# leading `┃` plus the U+00B7 middot separator - so the composer finder can
+# exclude the status row before content classification. The signature is
+# narrow enough that ordinary user input ("hello world") never matches.
+fm_backend_herdr_opencode_status_row() {  # <plain-row>
+  local row=$1
+  row="${row#"${row%%[![:space:]]*}"}"
+  row="${row%"${row##*[![:space:]]}"}"
+  case "$row" in
+    ┃\ *·*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+# Drop the last line of a (possibly multi-line, possibly empty) string. Used by
+# the opencode finder to strip the trailing status chrome row from a composer
+# run without forking sed.
+fm_backend_herdr_opencode_drop_last_line() {  # <string>
+  local s=$1
+  case "$s" in
+    *$'\n'*) printf '%s' "${s%$'\n'*}" ;;
+    *) printf '' ;;
+  esac
+}
+
+# Locate the bottom-most run of consecutive opencode composer rows (left-only
+# `┃` border) and return globals parallel to fm_backend_herdr_pi_composer_find:
+# pair-found flag, opening line, bottom composer line, last composer line seen
+# even when no valid pair formed, and the raw composer CONTENT with the trailing
+# status chrome row already removed. The globals let the caller compare this
+# shape's screen position with generic bordered/bare candidates without losing
+# empty composer content through command substitution. An over-tall run is
+# reported as not found but still sets LAST_COMPOSER_LINE so a stale generic
+# row above it cannot be promoted.
+fm_backend_herdr_opencode_composer_find() {  # <ansi-capture>
+  local cap=$1 line plain row=0
+  local in_run=0 run_start=0 run_lines=0 candidate="" last_plain=""
+  local best_start=0 best_end=0 best_content="" best_lines=0 max
+  max=$FM_BACKEND_HERDR_OPENCODE_COMPOSER_MAX_LINES
+  case "$max" in ''|*[!0-9]*|0) max=8 ;; esac
+  FM_BACKEND_HERDR_OPENCODE_PAIR_FOUND=0
+  FM_BACKEND_HERDR_OPENCODE_PAIR_OPEN_LINE=0
+  FM_BACKEND_HERDR_OPENCODE_PAIR_LINE=0
+  FM_BACKEND_HERDR_OPENCODE_LAST_COMPOSER_LINE=0
+  FM_BACKEND_HERDR_OPENCODE_CONTENT=""
+  while IFS= read -r line; do
+    row=$((row + 1))
+    plain=$(fm_backend_herdr_strip_ansi "$line")
+    if fm_backend_herdr_opencode_composer_row "$plain"; then
+      if [ "$in_run" -eq 0 ]; then
+        in_run=1
+        run_start=$row
+        run_lines=0
+        candidate=""
+      fi
+      run_lines=$((run_lines + 1))
+      FM_BACKEND_HERDR_OPENCODE_LAST_COMPOSER_LINE=$row
+      [ -z "$candidate" ] || candidate="${candidate}"$'\n'
+      candidate="${candidate}${line}"
+      last_plain=$plain
+      continue
+    fi
+    if [ "$in_run" -eq 1 ]; then
+      # The status chrome row, when present, is the LAST row of the run; drop
+      # it before forwarding the candidate.
+      if fm_backend_herdr_opencode_status_row "$last_plain"; then
+        candidate=$(fm_backend_herdr_opencode_drop_last_line "$candidate")
+      fi
+      best_start=$run_start
+      best_end=$((row - 1))
+      best_content=$candidate
+      best_lines=$run_lines
+      in_run=0
+    fi
+  done < <(printf '%s\n' "$cap")
+  # A run that runs to the bottom of the capture (no terminator after it).
+  if [ "$in_run" -eq 1 ]; then
+    if fm_backend_herdr_opencode_status_row "$last_plain"; then
+      candidate=$(fm_backend_herdr_opencode_drop_last_line "$candidate")
+    fi
+    best_start=$run_start
+    best_end=$row
+    best_content=$candidate
+    best_lines=$run_lines
+  fi
+  [ "$best_end" -gt 0 ] || return 0
+  [ "$best_lines" -le "$max" ] || return 0
+  FM_BACKEND_HERDR_OPENCODE_PAIR_FOUND=1
+  FM_BACKEND_HERDR_OPENCODE_PAIR_OPEN_LINE=$best_start
+  FM_BACKEND_HERDR_OPENCODE_PAIR_LINE=$best_end
+  FM_BACKEND_HERDR_OPENCODE_CONTENT=$best_content
 }
 
 fm_backend_herdr_agent_identity_raw() {  # <session> <pane> -> <agent>\t<status>
@@ -1968,6 +2095,37 @@ EOF
     # not provide the complete Pi composer structure required for injection.
     found=0
   fi
+  # opencode has no right border and no prompt glyph. Compare its bottom-most
+  # left-only `┃` run with the last generic match so an earlier bordered
+  # transcript row can never suppress the live opencode composer. Identity is
+  # consulted only when a lower opencode run could change the verdict.
+  fm_backend_herdr_opencode_composer_find "$cap"
+  if [ "$FM_BACKEND_HERDR_OPENCODE_PAIR_FOUND" -eq 1 ] \
+     && [ "$FM_BACKEND_HERDR_OPENCODE_PAIR_LINE" -gt "$generic_line" ] \
+     && [ "$generic_line" -lt "$FM_BACKEND_HERDR_OPENCODE_PAIR_OPEN_LINE" ]; then
+    identity=$(fm_backend_herdr_agent_identity_raw "$session" "$pane" 2>/dev/null || true)
+    IFS=$'\t' read -r agent agent_status <<EOF
+$identity
+EOF
+    case "$agent:$agent_status" in
+      opencode:idle|opencode:done|opencode:blocked)
+        shape=opencode-left-bar
+        raw_match=$FM_BACKEND_HERDR_OPENCODE_CONTENT
+        found=1
+        ;;
+      opencode:*)
+        # A working opencode cannot authorize injection, and the lower
+        # opencode run proves any generic row above is not current.
+        found=0
+        ;;
+      *) : ;; # A known non-opencode agent keeps its established verdict.
+    esac
+  elif [ "$FM_BACKEND_HERDR_OPENCODE_PAIR_FOUND" -eq 0 ] \
+       && [ "$FM_BACKEND_HERDR_OPENCODE_LAST_COMPOSER_LINE" -gt "$generic_line" ]; then
+    # A lower unmatched opencode-composer row proves the generic row is stale,
+    # but the run did not form a valid opencode composer (e.g. over-tall).
+    found=0
+  fi
   [ "$found" -eq 1 ] || { printf 'unknown'; return 0; }
   # Content: extract the real typed text from the raw row with the shared,
   # fleet-wide ghost stripper (bin/fm-composer-lib.sh), which drops dim/faint AND
@@ -1980,7 +2138,7 @@ EOF
   stripped=$(printf '%s\n' "$raw_match" | fm_composer_strip_ghost)
   stripped="${stripped#"${stripped%%[![:space:]]*}"}"
   stripped="${stripped%"${stripped##*[![:space:]]}"}"
-  if [ "$shape" = bordered ]; then
+  if [ "$shape" = bordered ] || [ "$shape" = opencode-left-bar ]; then
     bordered=1
     stripped=${stripped//│/}
     stripped=${stripped//┃/}

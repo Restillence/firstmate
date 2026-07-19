@@ -230,6 +230,7 @@ The checkpoint is deliberately foreground and bounded so Codex regains control r
 | Busy-pane signature | `esc interrupt` (dotted spinner footer; note no "to") |
 | Exit command | `/exit` |
 | Interrupt | double Escape; known flaky while a long shell command runs, so a wedged pane may need `/exit` and relaunch |
+| Idle-composer shape (herdr) | A left-only heavy-vertical (`┃`, U+2503) run with NO right border and NO prompt glyph; the trailing `Build · <model>` row inside the box is chrome (verified 2026-07-19, opencode 1.17.x under herdr 0.7.x; see docs/herdr-backend.md "Incident (2026-07-19)") |
 
 No trust dialog.
 Opencode can auto-upgrade itself in the background and the running TUI can exit mid-task, observed live from 1.15.7 to 1.17.3.

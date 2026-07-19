@@ -182,8 +182,9 @@ A human-blocked permission dialog has no busy banner and still surfaces.
 ## Composer and injection safety
 
 Herdr has no direct cursor-row primitive.
-The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, or a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked.
-A working Pi, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
+The adapter locates the bottom-most recognized bordered row, Claude `❯` row, Codex `›` row, a Pi separator region admitted only when native identity is exactly Pi and state is idle, done, or blocked, or an opencode left-only heavy-vertical (`┃`, U+2503) run admitted only when native identity is exactly opencode and state is idle, done, or blocked.
+A working Pi or opencode, pending middle row, missing identity, incomplete separator pair, or over-tall candidate remains pending or unknown.
+The opencode run's trailing `Build · <model>` status chrome row is excluded before classification; the never-inject-into-busy-pane contract holds for every shape.
 
 ANSI capture preserves de-emphasized placeholder style.
 `bin/fm-composer-lib.sh` is the fleet-wide owner that strips dim or faint runs and dark truecolor placeholders while retaining bright typed input.
@@ -198,6 +199,15 @@ The separate routed-request carrier uses `[fm-from-firstmate]` plus U+2063.
 U+2063 survives Herdr terminal input as text, unlike the legacy ASCII control separator that could erase the visible routing label.
 `bin/fm-operational-input.sh` owns current operational construction and parsing, and the AFK skill owns legacy away-input compatibility.
 No Herdr-specific copy of that protocol exists.
+
+## Incident (2026-07-19): opencode-on-Herdr away escalation stayed non-injectable for ~3.9 hours
+
+The away-mode daemon buffered a captain-relevant escalation and attempted injection on every housekeeping tick (~every 14-16 s) for ~3.9 hours.
+All 988 inject attempts returned `composer_state=unknown` because opencode's TUI renders its composer with a left-only heavy-vertical (`┃`, U+2503) border, no right border, and no prompt glyph - a shape the structural classifier did not recognize.
+The full byte-level investigation is recorded at `data/afk-wedge-diag-2026-07-19/report.md`.
+The fix adds opencode's left-only `┃` run as a fourth identity-gated structural shape, admitted only when native `agent get` reports `agent=opencode` with status `idle`, `done`, or `blocked`; a working opencode keeps the never-inject-into-busy-pane contract.
+The wedge alarm mechanism was healthy throughout; the captain was not paged because the Linux home had no `config/wedge-alarm` directive, so the alarm fired into a silent channel.
+`docs/examples/wedge-alarm` now ships a Linux `command:logger -t firstmate-fm-wedge` starting point.
 
 ## Restart and liveness behavior
 

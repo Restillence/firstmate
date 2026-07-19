@@ -1895,6 +1895,93 @@ test_composer_state_pi_separator_requires_safe_native_identity() {
   pass "fm_backend_herdr_composer_state: Pi separators never authorize working, non-Pi, unreadable, or over-tall targets"
 }
 
+# --- composer_state: opencode left-only `┃` border composer ---------------
+# Regression coverage for the away-mode injection wedge on 2026-07-19
+# (docs/herdr-backend.md "Incident (2026-07-19)"): real opencode 1.17.x under
+# herdr renders its composer with a left-only heavy vertical (U+2503) border,
+# no right border, and no prompt glyph; a `Build · <model>` status row sits
+# inside the box as chrome. The fixtures below capture that shape verbatim
+# (character-for-character) from the captain's live idle pane
+# (data/afk-wedge-diag-2026-07-19/report.md "Evidence C"). Before the fix
+# these reads returned `unknown`, so the away-mode injector refused for 988
+# ticks across ~3.9 hours and the captain was not paged until they returned.
+
+test_composer_state_opencode_left_bar_idle_is_empty() {
+  local dir log resp fb out calls
+  dir="$TMP_ROOT/composer-opencode-idle"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Verbatim tail of a real idle opencode pane (scout report Evidence C,
+  # rows 14-18); the leading transcript row confirms the structural scan does
+  # not promote a stale non-composer row.
+  printf 'transcript line above the composer\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83  Build \xc2\xb7 GLM-5.2 Z.AI\n  \xe2\x95\xb9\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = empty ] || fail "an idle native opencode left-bar composer should read empty, got '$out'"
+  calls=$(grep -c $'\x1f''agent'$'\x1f''get' "$log")
+  [ "$calls" -eq 1 ] || fail "opencode recognition must corroborate identity exactly once, made $calls agent calls"
+  pass "fm_backend_herdr_composer_state: a native idle opencode left-bar composer reads empty"
+}
+
+test_composer_state_opencode_left_bar_busy_is_unknown() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-opencode-busy"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # The same opencode shape but the pane is busy (scout report Counterfactual B).
+  # The identity gate must refuse so the never-inject-into-busy-pane contract holds.
+  printf 'transcript line above the composer\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83  Build \xc2\xb7 GLM-5.2 Z.AI\n  \xe2\x95\xb9\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\n  \xe2\x96\xa0\xe2\x96\xa0\xe2\xac\x9d\xe2\xac\x9d  esc interrupt   310.1K (31%%)\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"working"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = unknown ] || fail "a working opencode pane must remain unknown so injection cannot interrupt a turn, got '$out'"
+  pass "fm_backend_herdr_composer_state: a busy opencode pane keeps the never-inject-into-busy-pane contract"
+}
+
+test_composer_state_opencode_left_bar_real_text_is_pending() {
+  local dir log resp fb out
+  dir="$TMP_ROOT/composer-opencode-pending"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+  # Real user-typed text in the composer (a `┃  hello world` row above the
+  # status chrome row). The status row must be excluded as chrome; the
+  # remaining real text must read pending, not empty.
+  printf 'transcript line above the composer\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83  hello world\n  \xe2\x94\x83  Build \xc2\xb7 GLM-5.2 Z.AI\n  \xe2\x95\xb9\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\xe2\x96\x80\n' > "$resp/1.out"
+  printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+  fb=$(make_herdr_fakebin "$dir")
+  out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+    bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+  [ "$out" = pending ] || fail "real opencode composer text should read pending, got '$out'"
+  pass "fm_backend_herdr_composer_state: real opencode composer text remains pending while status chrome is treated as empty"
+}
+
+test_composer_state_opencode_left_bar_requires_safe_native_identity() {
+  local dir log resp fb out case_id
+  for case_id in non-opencode unreadable over-tall; do
+    dir="$TMP_ROOT/composer-opencode-$case_id"; mkdir -p "$dir/responses"; log="$dir/log"; resp="$dir/responses"; : > "$log"
+    case "$case_id" in
+      non-opencode)
+        printf 'transcript line above the composer\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83  Build \xc2\xb7 GLM-5.2 Z.AI\n' > "$resp/1.out"
+        printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
+        ;;
+      unreadable)
+        printf 'transcript line above the composer\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83  Build \xc2\xb7 GLM-5.2 Z.AI\n' > "$resp/1.out"
+        printf '1\n' > "$resp/2.exit"
+        ;;
+      over-tall)
+        {
+          printf 'transcript line above the composer\n'
+          for _ in 1 2 3 4 5 6 7 8 9; do printf '  \xe2\x94\x83\n'; done
+          printf '  \xe2\x94\x83  Build \xc2\xb7 GLM-5.2 Z.AI\n'
+        } > "$resp/1.out"
+        printf '{"result":{"agent":{"agent":"opencode","agent_status":"idle"}}}\n' > "$resp/2.out"
+        ;;
+    esac
+    fb=$(make_herdr_fakebin "$dir")
+    out=$( PATH="$fb:$PATH" FM_HERDR_LOG="$log" FM_HERDR_RESPONSES="$resp" \
+      bash -c '. "$0/bin/backends/herdr.sh"; fm_backend_herdr_composer_state lab:w1:p2' "$ROOT" )
+    [ "$out" = unknown ] || fail "unsafe opencode left-bar case '$case_id' must remain unknown, got '$out'"
+  done
+  pass "fm_backend_herdr_composer_state: opencode left-bar never authorizes a non-opencode identity, an unreadable identity, or an over-tall run"
+}
+
 # --- composer_state: unbordered (bare) composer rows -------------------------
 # Regression coverage for the away-mode redelivery-loop incident
 # (docs/herdr-backend.md "Incident (2026-07-07)"): real claude and codex
@@ -3057,6 +3144,10 @@ test_composer_state_pi_separator_idle_is_empty
 test_composer_state_pi_separator_real_text_is_pending
 test_composer_state_pi_incomplete_separator_below_stale_generic_is_unknown
 test_composer_state_pi_separator_requires_safe_native_identity
+test_composer_state_opencode_left_bar_idle_is_empty
+test_composer_state_opencode_left_bar_busy_is_unknown
+test_composer_state_opencode_left_bar_real_text_is_pending
+test_composer_state_opencode_left_bar_requires_safe_native_identity
 test_composer_state_claude_unbordered_prompt_is_empty
 test_composer_state_claude_unbordered_prompt_is_pending
 test_composer_state_bare_prompt_below_stale_bordered_banner_wins
