@@ -1962,7 +1962,7 @@ test_composer_state_opencode_left_bar_requires_safe_native_identity() {
         printf '{"result":{"agent":{"agent":"claude","agent_status":"idle"}}}\n' > "$resp/2.out"
         ;;
       unreadable)
-        printf 'transcript line above the composer\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83  Build \xc2\xb7 GLM-5.2 Z.AI\n' > "$resp/1.out"
+        printf '\xe2\x94\x82 stale bordered transcript row \xe2\x94\x82\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83\n  \xe2\x94\x83  Build \xc2\xb7 GLM-5.2 Z.AI\n' > "$resp/1.out"
         printf '1\n' > "$resp/2.exit"
         ;;
       over-tall)

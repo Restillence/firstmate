@@ -2113,7 +2113,7 @@ EOF
         raw_match=$FM_BACKEND_HERDR_OPENCODE_CONTENT
         found=1
         ;;
-      opencode:*)
+      opencode:*|:*)
         # A working opencode cannot authorize injection, and the lower
         # opencode run proves any generic row above is not current.
         found=0
