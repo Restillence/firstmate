@@ -25,9 +25,10 @@ command: curl -fsS -H "Title: firstmate wedge alarm" -d "$1" https://ntfy.sh/rep
 # OS-level alert channel on Linux" and the durable state/.subsuper-inject-wedged
 # marker is the only signal - nothing surfaces it until bin/fm-afk-return.sh
 # runs on the captain's return. A `command:` directive gives the alarm a real
-# channel. logger(1) ships on every Linux distribution and writes the summary
-# to syslog, so `journalctl -t firstmate-fm-wedge` (or /var/log/messages) shows
-# the wedge without any external service. Add ntfy or another push channel on a
-# second line if the captain is ever away from the host itself.
+# channel. On a system with logger(1) and a local system log, this writes the
+# summary under the `firstmate-fm-wedge` tag; inspect it with
+# `journalctl -t firstmate-fm-wedge` on systemd-journald systems or the host's
+# configured syslog destination. Add ntfy or another push channel on a second
+# line if the captain is ever away from the host itself.
 # command: logger -t firstmate-fm-wedge
 # command: curl -fsS -H "Title: firstmate wedge alarm" -d "$1" https://ntfy.sh/replace-with-your-topic
