@@ -103,6 +103,13 @@ wait_for_composer_state() {  # <target> <wanted> <attempts>
   return 1
 }
 
+# Is the harness's window still there? A first-run prompt can be an update
+# offer that EXITS the harness when answered, and every later probe against a
+# gone window would otherwise spray raw tmux errors over the report.
+harness_window_alive() {  # <target>
+  "$REAL_TMUX" -L "$SOCKET" list-panes -t "$1" >/dev/null 2>&1
+}
+
 # Has the harness actually PUT A COMPOSER ON SCREEN yet? Without this, a pane
 # still painting, sitting on a first-run notice, or dead at a blank row can
 # report `empty` from the non-bordered fallback row and turn the whole case
@@ -168,10 +175,11 @@ for harness in claude codex opencode pi pi-signed grok kimi muse; do
   # empty composer is a no-op. This is why the guard runs against a throwaway
   # working directory.
   sleep 3
-  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$target" Enter
+  "$REAL_TMUX" -L "$SOCKET" send-keys -t "$target" Enter 2>/dev/null || true
   sleep 3
   dismissed=0
   while [ "$dismissed" -lt 3 ]; do
+    harness_window_alive "$target" || break
     wait_for_composer_on_screen "$target" 100 || true
     settled_a=$("$REAL_TMUX" -L "$SOCKET" capture-pane -p -t "$target" 2>/dev/null || true)
     sleep 2
@@ -179,10 +187,15 @@ for harness in claude codex opencode pi pi-signed grok kimi muse; do
     if [ "$settled_a" = "$settled_b" ] && composer_is_on_screen "$target"; then
       break
     fi
-    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$target" Enter
+    "$REAL_TMUX" -L "$SOCKET" send-keys -t "$target" Enter 2>/dev/null || true
     dismissed=$((dismissed + 1))
     sleep 2
   done
+  if ! harness_window_alive "$target"; then
+    SKIPPED="$SKIPPED $harness"
+    note "unmeasured: $harness $version exited during its first-run prompt here, so its verdict is unverified"
+    continue
+  fi
   if ! composer_is_on_screen "$target"; then
     SKIPPED="$SKIPPED $harness"
     note "unmeasured: $harness $version never settled on a composer here (first-run prompt, or not authenticated), so its verdict is unverified"

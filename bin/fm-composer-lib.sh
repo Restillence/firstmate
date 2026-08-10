@@ -189,9 +189,76 @@ fm_composer_idle_matches() {
   esac
 }
 
+# NON-ASCII PADDING (task fm-afk-wedge-unreachable). A harness may pad its own
+# composer row with a space character that bash's `[:space:]` does not match in a
+# UTF-8 locale: claude 2.1.226 draws its EMPTY composer as `❯` U+00A0 (bytes
+# e2 9d af c2 a0), so an idle composer holding nothing at all classified as
+# `pending`. The away-mode daemon then deferred every escalation into a pane the
+# captain could see was empty - 4714 deferrals on 2026-08-09 and 345 more the
+# next day - and the entry pre-flight in bin/fm-afk-launch.sh refuses a delivery
+# path that is in fact healthy.
+#
+# The trim below is deliberately narrow. It removes only characters in Unicode's
+# SPACE SEPARATOR (Zs) category, from the two ENDS of the content, and nothing
+# else. That keeps it to characters that carry no input and that a captain has no
+# way to type as content, so it corrects a false positive without ever making
+# genuine unsubmitted text injectable:
+#   - interior characters are never touched, so `a<U+00A0>b` stays pending;
+#   - zero-width and format characters are NOT in this set and are never
+#     trimmed. That is load-bearing for U+200B and for U+2063, the operational
+#     prefix marker: a composer holding an unsent injection still reads pending.
+# A character outside Zs stays real text, which is the safe direction: an
+# unrecognised pad merely defers, and the max-defer alarm surfaces that, while
+# over-trimming would type over a captain's line.
+FM_COMPOSER_SPACE_SEPARATORS=(
+  # Written as UTF-8 byte escapes, not literal characters: these are invisible
+  # in a diff, and the set is a safety boundary a reviewer has to be able to
+  # read. U+0020 is already covered by the [:space:] pass above.
+  $'\xc2\xa0'  # U+00A0 NO-BREAK SPACE (claude 2.1.226 pads its empty composer with this)
+  $'\xe1\x9a\x80'  # U+1680 OGHAM SPACE MARK
+  $'\xe2\x80\x80'  # U+2000 EN QUAD
+  $'\xe2\x80\x81'  # U+2001 EM QUAD
+  $'\xe2\x80\x82'  # U+2002 EN SPACE
+  $'\xe2\x80\x83'  # U+2003 EM SPACE
+  $'\xe2\x80\x84'  # U+2004 THREE-PER-EM SPACE
+  $'\xe2\x80\x85'  # U+2005 FOUR-PER-EM SPACE
+  $'\xe2\x80\x86'  # U+2006 SIX-PER-EM SPACE
+  $'\xe2\x80\x87'  # U+2007 FIGURE SPACE
+  $'\xe2\x80\x88'  # U+2008 PUNCTUATION SPACE
+  $'\xe2\x80\x89'  # U+2009 THIN SPACE
+  $'\xe2\x80\x8a'  # U+200A HAIR SPACE
+  $'\xe2\x80\xaf'  # U+202F NARROW NO-BREAK SPACE
+  $'\xe2\x81\x9f'  # U+205F MEDIUM MATHEMATICAL SPACE
+  $'\xe3\x80\x80'  # U+3000 IDEOGRAPHIC SPACE
+)
+
+# fm_composer_trim_spaces: strip leading and trailing whitespace - the locale's
+# own `[:space:]` plus the Zs characters above - and print what is left. Loops
+# until stable so mixed padding (`<U+00A0> <U+2009>`) is fully removed; each pass
+# either shortens the string or ends the loop.
+fm_composer_trim_spaces() {  # <content>
+  local content=$1 previous separator
+  while :; do
+    previous=$content
+    content="${content#"${content%%[![:space:]]*}"}"
+    content="${content%"${content##*[![:space:]]}"}"
+    for separator in "${FM_COMPOSER_SPACE_SEPARATORS[@]}"; do
+      content=${content#"$separator"}
+      content=${content%"$separator"}
+    done
+    [ "$content" = "$previous" ] && break
+  done
+  printf '%s' "$content"
+}
+
 fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [plain_content]
   local bordered=$1 content=$2 idle_re=${3:-} idle_case=${4:-sensitive} plain_content
   plain_content=${5:-$content}
+  # Normalise the padding an adapter's own trim cannot see (see
+  # fm_composer_trim_spaces above). Both the content and the plain row are
+  # normalised, because the bare-glyph fallback below reads the plain row.
+  content=$(fm_composer_trim_spaces "$content")
+  plain_content=$(fm_composer_trim_spaces "$plain_content")
   if [ "$bordered" != 1 ] && [ -z "$content" ] && [ -n "$plain_content" ]; then
     case "$plain_content" in
       '❯'|'›'|'⟩') printf 'empty'; return 0 ;;
@@ -220,8 +287,7 @@ fm_composer_classify_content() {  # <bordered> <content> [idle_re] [idle_case] [
     '❯ '*|'› '*|'⟩ '*|'> '*|'$ '*|'% '*|'# '*) content=${content#??} ;;
     '❯'*|'›'*|'⟩'*|'>'*|'$'*|'%'*|'#'*) content=${content#?} ;;
   esac
-  content="${content#"${content%%[![:space:]]*}"}"
-  content="${content%"${content##*[![:space:]]}"}"
+  content=$(fm_composer_trim_spaces "$content")
   [ -n "$content" ] || { printf 'empty'; return 0; }
   # Known idle placeholder (matched again after the leading glyph was stripped,
   # e.g. "❯ Type a message...").

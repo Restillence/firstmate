@@ -448,7 +448,7 @@ wedge_alarm_fire_channel() {  # <channel> <summary>
 # signal, so a wedge with no channel looked exactly like a wedge that alerted;
 # the caller now gets a distinct outcome it can put in the durable record.
 wedge_alarm_notify() {  # <summary> <marker>
-  local summary=$1 marker=$2 ch delivered= reasons=
+  local summary=$1 marker=$2 ch delivered='' reasons=''
   local -a channels=()
   WEDGE_ALARM_LAST_OUTCOME=
   while IFS= read -r ch; do
@@ -498,7 +498,7 @@ wedge_alarm_selftest() {  # <channel>
 #   1  no channel can reach the captain
 #   2  the captain turned active alerts off, accepting the durable marker alone
 wedge_alarm_preflight() {
-  local ch state detail deliverable= off=
+  local ch state detail deliverable='' off=''
   while IFS= read -r ch; do
     [ "$ch" = off ] || continue
     off=1

@@ -410,14 +410,14 @@ The composer half of the pre-flight reads a surface each harness vendor controls
 
 Measured 2026-08-10 on Linux aarch64:
 
-| harness | version | settled idle composer | verdict |
-| --- | --- | --- | --- |
-| claude | 2.1.226 (Claude Code) | `❯` U+00A0 (bytes `e2 9d af c2 a0`) | `pending` - DRIFT |
+| harness | version | settled idle composer row | idle | text waiting |
+| --- | --- | --- | --- | --- |
+| claude | 2.1.226 (Claude Code) | `❯` U+00A0 (bytes `e2 9d af c2 a0`) | `empty` | `pending` |
 
-An idle claude 2.1.226 pads its own prompt glyph with U+00A0 NO-BREAK SPACE, which the composer classifier trims as neither whitespace nor glyph, so a composer holding nothing at all reads as unsubmitted input.
-Every away-mode escalation into such a pane defers, and away-mode entry refuses a delivery path that is in fact healthy.
-That classification is owned by `bin/fm-composer-lib.sh` and is not changed here; this record exists so the measurement is not lost.
+An idle claude 2.1.226 pads its own prompt glyph with U+00A0 NO-BREAK SPACE, which bash's `[:space:]` does not match in a UTF-8 locale.
+Before the space-separator trim in `bin/fm-composer-lib.sh`, that composer - holding nothing at all - classified as `pending`, so the away-mode daemon deferred every escalation into an idle claude pane (4714 deferrals on 2026-08-09, 345 more on 2026-08-10) and away-mode entry would refuse a delivery path that was in fact healthy.
+The trim removes only Unicode space-separator (Zs) characters from the two ends of the content; `tests/fm-composer-lib.test.sh` pins both directions, including that U+200B and the U+2063 operational marker are never trimmed.
 
-`codex` 0.144.1 and `opencode` 1.18.15 are installed on that machine but never settled on a composer during the run - both sit behind a first-run prompt on a throwaway working directory - so their verdicts are unmeasured there rather than passing.
+`codex` 0.147.0 and `opencode` 1.18.16 are installed on that machine but never settled on a composer during the run - both sit behind a first-run prompt on a throwaway working directory - so their verdicts are unmeasured there rather than passing.
 `pi`, `pi-signed`, `grok`, `kimi`, and `muse` are not installed.
 The guard reports every harness it skipped or could not measure, and refuses to pass when it measured nothing.
