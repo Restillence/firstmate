@@ -26,6 +26,8 @@ batched digest rather than per-wake injections.
    **The entry pre-flight can refuse, and a refusal is the answer.**
    Away mode is only as good as its delivery path, so entry proves that path before anything reports away mode active: the supervisor composer must read affirmatively empty, and an active alert must be able to reach the captain (or be explicitly turned off, which is the captain's own consent to the durable record alone).
    On a refusal, relay the concrete condition and its fix to the captain in section 9 language and do not report away mode active.
+   A RE-ENTRY while away mode is already active never refuses: it re-arms the supervisor and reports the failing condition instead, so a restart can never leave the flag set with no daemon running.
+   When that happens, surface the reported condition on the captain's return rather than reporting away mode healthy.
    Never re-run with `--force` on your own judgement: that override starts a supervisor that may never deliver, so it needs the captain's explicit word.
    `--force` never relaxes the injection guard - the daemon still defers rather than typing over a captain's line - it only starts away mode anyway.
    `bin/fm-afk-launch.sh preflight` reports the same verdict without changing anything.

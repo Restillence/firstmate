@@ -284,8 +284,10 @@ elif herdr status --json 2>/dev/null | grep -q '"running"[[:space:]]*:[[:space:]
   expect_channel_state herdr unproven "a herdr server is running but only a real notification proves delivery"
   if [ "${FM_AFK_PREFLIGHT_LIVE_HERDR_NOTIFY:-0}" = 1 ]; then
     # The only way to resolve `unproven`: ask herdr to show one, and believe its
-    # own `shown` field rather than its exit status.
-    if FM_WEDGE_ALARM_EXEC='' wedge_alarm_via_herdr "FIRSTMATE TEST - IGNORE (away-mode alert channel check)"; then
+    # own `shown` field rather than its exit status. Routed through the entry
+    # self-test, so what a captain sees here is titled as a channel check and
+    # can never be mistaken for a real wedge alarm.
+    if FM_WEDGE_ALARM_EXEC='' wedge_alarm_selftest herdr; then
       note "channel herdr: a real notification was shown, so this machine has a reachable alert channel"
     else
       note "channel herdr: herdr accepted a real notification and did not show it, so this machine has no reachable herdr alert channel"

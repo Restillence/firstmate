@@ -1529,6 +1529,90 @@ test_wedge_alarm_herdr_suppressed_notification_is_a_failure() {
   pass "the herdr channel believes herdr's own shown field, not its exit status"
 }
 
+# The away-mode entry self-test delivers on every entry, every idempotent
+# refresh, and every preflight report. If it wore the alarm's own title the
+# captain would learn to dismiss the one notification this alarm exists to make
+# credible, so the two must be distinguishable on every carrier that can post
+# one.
+test_wedge_alarm_selftest_is_titled_apart_from_the_real_alarm() {
+  local dir argv channel
+  dir=$(make_wedge_case wedge-selftest-title); argv="$dir/argv.log"
+  cat > "$dir/fakebin/notify-send" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_WEDGE_ALARM_ARGV_LOG:?}"
+exit 0
+SH
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status) printf '{"server":{"running":true}}\n' ;;
+  notification)
+    printf '%s\n' "$*" >> "${FM_WEDGE_ALARM_ARGV_LOG:?}"
+    printf '{"result":{"shown":true,"reason":"shown"}}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/notify-send" "$dir/fakebin/herdr"
+  for channel in notify-send herdr; do
+    : > "$argv"
+    PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_ARGV_LOG="$argv" \
+      wedge_alarm_selftest "$channel" \
+      || fail "the $channel entry self-test did not deliver"
+    grep -F 'away-mode escalations WEDGED' "$argv" >/dev/null \
+      && fail "the $channel entry self-test posted the real wedge alarm's title: $(cat "$argv")"
+    grep -F 'alert channel check' "$argv" >/dev/null \
+      || fail "the $channel entry self-test was not titled as a channel check: $(cat "$argv")"
+    grep -F 'No escalation is wedged' "$argv" >/dev/null \
+      || fail "the $channel entry self-test body did not say that nothing is wrong: $(cat "$argv")"
+    : > "$argv"
+    PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_ARGV_LOG="$argv" \
+      wedge_alarm_fire_channel "$channel" "away-mode WEDGED 900s" \
+      || fail "the real $channel alarm did not deliver"
+    grep -F 'away-mode escalations WEDGED' "$argv" >/dev/null \
+      || fail "the real $channel alarm lost its own title: $(cat "$argv")"
+  done
+  pass "the entry self-test is titled and worded apart from the real wedge alarm on every carrier"
+}
+
+# The carrier probes sit on the daemon's own alarm path (wedge_alarm_notify ->
+# auto -> channel status), so a carrier that stops answering must not block the
+# single-threaded housekeeping loop during the alarm it exists to raise. A probe
+# the watchdog stops is not-proven-deliverable, never available.
+test_wedge_alarm_carrier_probes_are_watchdog_bounded() {
+  local dir daemon_log started elapsed status tool
+  dir=$(make_wedge_case wedge-probe-timeout); daemon_log="$dir/daemon.log"
+  for tool in herdr gdbus busctl dbus-send; do
+    cat > "$dir/fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+sleep 60
+SH
+    chmod +x "$dir/fakebin/$tool"
+  done
+  started=$SECONDS
+  status=$(LOG="$daemon_log" PATH="$dir/fakebin:$PATH" FM_FAKE_UNAME=Linux \
+    FM_WEDGE_ALARM_TIMEOUT_SECS=1 wedge_alarm_channel_status herdr)
+  elapsed=$((SECONDS - started))
+  [ "$elapsed" -lt 30 ] || fail "the herdr status probe ran unbounded for ${elapsed}s"
+  case "$status" in
+    unproven*) ;;
+    *) fail "a herdr probe stopped by the watchdog was not reported as unproven: $status" ;;
+  esac
+  grep -F 'herdr probe timed out' "$daemon_log" >/dev/null \
+    || fail "the herdr probe timeout was not reported: $(cat "$daemon_log" 2>/dev/null)"
+  started=$SECONDS
+  status=$(LOG="$daemon_log" PATH="$dir/fakebin:$PATH" FM_FAKE_UNAME=Linux \
+    FM_WEDGE_ALARM_TIMEOUT_SECS=1 wedge_alarm_channel_status notify-send)
+  elapsed=$((SECONDS - started))
+  [ "$elapsed" -lt 30 ] || fail "the notification service probe ran unbounded for ${elapsed}s"
+  case "$status" in
+    unproven*) ;;
+    *) fail "a notification service probe stopped by the watchdog was not reported as unproven: $status" ;;
+  esac
+  grep -F 'gdbus probe timed out' "$daemon_log" >/dev/null \
+    || fail "the notification service probe timeout was not reported: $(cat "$daemon_log" 2>/dev/null)"
+  pass "the carrier probes are watchdog bounded and a stopped probe never counts as available"
+}
+
 # The second half of the incident: a wedge with no channel must be DETECTED and
 # recorded, not left indistinguishable from a wedge that alerted.
 test_wedge_alarm_unreachable_is_detected_and_stated() {
@@ -2080,6 +2164,8 @@ test_wedge_alarm_auto_skips_notify_send_without_a_notification_service
 test_wedge_alarm_auto_survives_losing_either_candidate
 test_wedge_alarm_auto_darwin_keeps_osascript_and_adds_herdr
 test_wedge_alarm_herdr_suppressed_notification_is_a_failure
+test_wedge_alarm_selftest_is_titled_apart_from_the_real_alarm
+test_wedge_alarm_carrier_probes_are_watchdog_bounded
 test_wedge_alarm_unreachable_is_detected_and_stated
 test_wedge_alarm_delivered_outcome_names_the_channel
 test_inject_wedge_alarm_marker_carries_the_alarm_outcome

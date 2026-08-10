@@ -48,6 +48,27 @@
 WEDGE_ALARM_TIMEOUT_SECS_DEFAULT=10
 WEDGE_ALARM_NOTIFIER_PID=
 
+# The real alarm and the entry self-test carry DIFFERENT titles and bodies on
+# every carrier. A self-test delivers on every away-mode entry, every idempotent
+# refresh, and every `preflight` report, so wearing the alarm's own "WEDGED"
+# title would teach the captain to ignore the one notification this alarm exists
+# to make credible.
+WEDGE_ALARM_TITLE_ALARM='firstmate: away-mode escalations WEDGED'
+WEDGE_ALARM_TITLE_SELFTEST='firstmate: away-mode alert channel check (nothing is wrong)'
+WEDGE_ALARM_BODY_SELFTEST='Delivery-path check while entering away mode: this channel can reach you. No escalation is wedged and nothing needs doing.'
+
+# Which title the notifiers post. wedge_alarm_selftest sets
+# WEDGE_ALARM_SELFTEST_ACTIVE for the duration of its own delivery, so every
+# channel switches together and no carrier can be left announcing a wedge that
+# is not happening.
+wedge_alarm_notification_title() {
+  if [ "${WEDGE_ALARM_SELFTEST_ACTIVE:-0}" = 1 ]; then
+    printf '%s' "$WEDGE_ALARM_TITLE_SELFTEST"
+  else
+    printf '%s' "$WEDGE_ALARM_TITLE_ALARM"
+  fi
+}
+
 # Diagnostic sink. Callers override it: the daemon points it at its timestamped
 # daemon log, the away launcher at its own captain-facing reporter. The default
 # keeps a bare `source` usable without either.
@@ -82,35 +103,56 @@ wedge_alarm_configured_channels() {
 # clients are accepted (glib, systemd, dbus) and any one of them answers; when
 # none is installed the answer is genuinely unknown and that is reported as
 # such rather than guessed either way.
-#   0 = owned, 1 = not owned, 2 = no probe tool installed
+#
+# The probe runs under the same process-group watchdog as every notifier: it
+# sits on the daemon's own alarm path, so a session bus that never answers must
+# not block the single-threaded housekeeping loop during the alarm it exists to
+# raise. A watchdog stop is reported as its own answer, never as owned.
+#   0 = owned, 1 = not owned, 2 = no probe tool installed,
+#   3 = a probe ran and did not answer within the watchdog
 wedge_alarm_notification_service_owned() {
-  local name=org.freedesktop.Notifications
+  local name=org.freedesktop.Notifications out rc
+  local WEDGE_ALARM_BOUNDED_ROLE=probe
   if command -v gdbus >/dev/null 2>&1; then
-    gdbus call --session --dest org.freedesktop.DBus \
+    out=$(wedge_alarm_run_bounded gdbus gdbus call --session --dest org.freedesktop.DBus \
       --object-path /org/freedesktop/DBus \
-      --method org.freedesktop.DBus.NameHasOwner "$name" 2>/dev/null | grep -qw true
-    return
+      --method org.freedesktop.DBus.NameHasOwner "$name" 2>/dev/null)
+    rc=$?
+  elif command -v busctl >/dev/null 2>&1; then
+    out=$(wedge_alarm_run_bounded busctl busctl --user call org.freedesktop.DBus \
+      /org/freedesktop/DBus org.freedesktop.DBus NameHasOwner s "$name" 2>/dev/null)
+    rc=$?
+  elif command -v dbus-send >/dev/null 2>&1; then
+    out=$(wedge_alarm_run_bounded dbus-send dbus-send --session --print-reply \
+      --dest=org.freedesktop.DBus /org/freedesktop/DBus \
+      org.freedesktop.DBus.NameHasOwner "string:$name" 2>/dev/null)
+    rc=$?
+  else
+    return 2
   fi
-  if command -v busctl >/dev/null 2>&1; then
-    busctl --user call org.freedesktop.DBus /org/freedesktop/DBus \
-      org.freedesktop.DBus NameHasOwner s "$name" 2>/dev/null | grep -qw true
-    return
-  fi
-  if command -v dbus-send >/dev/null 2>&1; then
-    dbus-send --session --print-reply --dest=org.freedesktop.DBus \
-      /org/freedesktop/DBus org.freedesktop.DBus.NameHasOwner "string:$name" 2>/dev/null |
-      grep -qw true
-    return
-  fi
-  return 2
+  case "$rc" in
+    124|125) return 3 ;;
+  esac
+  printf '%s' "$out" | grep -qw true
 }
 
 # Is a herdr server running and compatible? Read-only: `herdr status --json`
-# never starts a server and never touches a session.
+# never starts a server and never touches a session. Watchdog-bounded for the
+# same reason as the D-Bus probe above, and a herdr server that stops answering
+# is reported as unproven rather than as running.
+#   0 = running, 1 = not running or unreadable,
+#   2 = herdr ran and did not answer within the watchdog
 wedge_alarm_herdr_server_running() {
-  local out
+  local out rc
+  local WEDGE_ALARM_BOUNDED_ROLE=probe
   command -v herdr >/dev/null 2>&1 || return 1
-  out=$(herdr status --json 2>/dev/null) || return 1
+  out=$(wedge_alarm_run_bounded herdr herdr status --json 2>/dev/null)
+  rc=$?
+  case "$rc" in
+    124|125) return 2 ;;
+    0) ;;
+    *) return 1 ;;
+  esac
   [ -n "$out" ] || return 1
   if command -v jq >/dev/null 2>&1; then
     printf '%s' "$out" | jq -e '.server.running == true' >/dev/null 2>&1
@@ -122,7 +164,7 @@ wedge_alarm_herdr_server_running() {
 # wedge_alarm_channel_status: classify ONE directive as
 # "<available|unavailable|unproven|disabled><TAB><fixed detail>".
 wedge_alarm_channel_status() {  # <directive>
-  local directive=$1
+  local directive=$1 probe
   case "$directive" in
     off)
       printf 'disabled\tactive alerts turned off in config/wedge-alarm' ;;
@@ -138,19 +180,26 @@ wedge_alarm_channel_status() {  # <directive>
       if ! command -v notify-send >/dev/null 2>&1; then
         printf 'unavailable\tnotify-send is not installed'
       else
-        case "$(wedge_alarm_notification_service_owned; printf '%s' $?)" in
+        wedge_alarm_notification_service_owned
+        probe=$?
+        case "$probe" in
           0) printf 'available\tdesktop notification service' ;;
           1) printf 'unavailable\tnotify-send is installed but no desktop notification service is running' ;;
+          3) printf 'unproven\tnotify-send is installed but the desktop notification service did not answer within the alarm timeout' ;;
           *) printf 'unproven\tnotify-send is installed but no gdbus, busctl, or dbus-send is available to confirm a notification service' ;;
         esac
       fi ;;
     herdr)
       if ! command -v herdr >/dev/null 2>&1; then
         printf 'unavailable\therdr is not installed'
-      elif ! wedge_alarm_herdr_server_running; then
-        printf 'unavailable\tno herdr server is running'
       else
-        printf 'unproven\therdr is running but only a real notification proves it is not suppressed'
+        wedge_alarm_herdr_server_running
+        probe=$?
+        case "$probe" in
+          0) printf 'unproven\therdr is running but only a real notification proves it is not suppressed' ;;
+          2) printf 'unproven\therdr did not report its status within the alarm timeout' ;;
+          *) printf 'unavailable\tno herdr server is running' ;;
+        esac
       fi ;;
     command:*)
       if [ -n "${directive#command:}" ]; then
@@ -206,8 +255,13 @@ wedge_alarm_resolved_channels() {
   done < <(wedge_alarm_configured_channels)
 }
 
+# Run one external command in its own process group under a watchdog. Both the
+# notifiers and the carrier probes use it, so nothing this library shells out to
+# can hang the daemon's single-threaded housekeeping loop.
+# WEDGE_ALARM_BOUNDED_ROLE names what is being bounded in the diagnostics.
 wedge_alarm_run_bounded() {
   local channel=$1 timeout monitor_was_on=0 pid start elapsed rc
+  local role=${WEDGE_ALARM_BOUNDED_ROLE:-notifier}
   shift
   timeout=${FM_WEDGE_ALARM_TIMEOUT_SECS:-$WEDGE_ALARM_TIMEOUT_SECS_DEFAULT}
   case "$timeout" in
@@ -218,7 +272,7 @@ wedge_alarm_run_bounded() {
   set -m 2>/dev/null || true
   case $- in
     *m*) ;;
-    *) fm_wedge_alarm_log "wedge alarm: ${channel} notifier skipped because its watchdog could not start"; return 125 ;;
+    *) fm_wedge_alarm_log "wedge alarm: ${channel} ${role} skipped because its watchdog could not start"; return 125 ;;
   esac
   "$@" &
   pid=$!
@@ -229,7 +283,7 @@ wedge_alarm_run_bounded() {
     if [ "$elapsed" -ge "$timeout" ]; then
       wedge_alarm_stop_active_notifier
       [ "$monitor_was_on" -eq 1 ] || set +m 2>/dev/null || true
-      fm_wedge_alarm_log "wedge alarm: ${channel} notifier timed out after ${elapsed}s (limit ${timeout}s)"
+      fm_wedge_alarm_log "wedge alarm: ${channel} ${role} timed out after ${elapsed}s (limit ${timeout}s)"
       return 124
     fi
     sleep 0.1
@@ -289,8 +343,8 @@ wedge_alarm_via_osascript() {  # <summary>
     WEDGE_ALARM_CHANNEL_REASON="osascript is not installed"
     fm_wedge_alarm_log "wedge alarm: osascript not found; cannot post a macOS notification"; return 1; }
   wedge_alarm_run_bounded osascript osascript -e 'on run argv' \
-    -e 'display notification (item 1 of argv) with title "firstmate: away-mode escalations WEDGED" sound name "Basso"' \
-    -e 'end run' "$summary" >/dev/null 2>&1 && return 0
+    -e 'display notification (item 1 of argv) with title (item 2 of argv) sound name "Basso"' \
+    -e 'end run' "$summary" "$(wedge_alarm_notification_title)" >/dev/null 2>&1 && return 0
   WEDGE_ALARM_CHANNEL_REASON="osascript could not post a notification"
   fm_wedge_alarm_log "wedge alarm: osascript notification failed"
   return 1
@@ -313,7 +367,7 @@ wedge_alarm_via_notify_send() {  # <summary>
     WEDGE_ALARM_CHANNEL_REASON="notify-send is not installed"
     fm_wedge_alarm_log "wedge alarm: notify-send not found; cannot post a desktop notification"; return 1; }
   wedge_alarm_run_bounded notify-send notify-send --urgency=critical --app-name=firstmate \
-    "firstmate: away-mode escalations WEDGED" "$summary" >/dev/null 2>&1 && return 0
+    "$(wedge_alarm_notification_title)" "$summary" >/dev/null 2>&1 && return 0
   WEDGE_ALARM_CHANNEL_REASON="notify-send failed, which is what an absent desktop notification service produces"
   fm_wedge_alarm_log "wedge alarm: notify-send notification failed (no desktop notification service?)"
   return 1
@@ -341,7 +395,7 @@ wedge_alarm_via_herdr() {  # <summary>
   out=$(mktemp "${TMPDIR:-/tmp}/fm-wedge-herdr.XXXXXX") || {
     WEDGE_ALARM_CHANNEL_REASON="the herdr notification result could not be captured"
     fm_wedge_alarm_log "wedge alarm: could not capture the herdr notification result"; return 1; }
-  wedge_alarm_run_bounded herdr herdr notification show "firstmate: away-mode escalations WEDGED" \
+  wedge_alarm_run_bounded herdr herdr notification show "$(wedge_alarm_notification_title)" \
     --body "$summary" --sound request >"$out" 2>/dev/null
   rc=$?
   shown=1
@@ -485,9 +539,14 @@ wedge_alarm_notify() {  # <summary> <marker>
 # (herdr accepts and silently suppresses). Used by the away-mode entry
 # pre-flight only, never by the alarm itself: the alarm's own delivery is its
 # test. Returns 0 when the channel demonstrably delivered.
+#
+# It carries the check's own title and body, never the alarm's. This check
+# delivers on every entry, every idempotent refresh, and every `preflight`
+# report, so a captain who saw "escalations WEDGED" each of those times would
+# learn to dismiss the real alarm on sight.
 wedge_alarm_selftest() {  # <channel>
-  wedge_alarm_fire_channel "$1" \
-    "away-mode alert channel check - firstmate can reach you while you are away"
+  local WEDGE_ALARM_SELFTEST_ACTIVE=1
+  wedge_alarm_fire_channel "$1" "$WEDGE_ALARM_BODY_SELFTEST"
 }
 
 # wedge_alarm_preflight: report, one channel per line as

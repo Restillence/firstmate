@@ -957,6 +957,21 @@ preflight_cases() {
   else
     fail "pre-flight: --force did not start away mode or did not state the override ($out)"
   fi
+
+  # 3b. Away mode is now ALREADY active with the same blocked composer. A
+  #     re-entry - what firstmate performs after a restart, per AGENTS.md - must
+  #     re-arm the supervisor and REPORT the blocked path. Refusing here would
+  #     leave state/.afk set with no supervisor and nothing left to raise the
+  #     wedge alarm, which is the incident's own shape.
+  out=$(preflight_run "$st" "$pane" 'command:true' start)
+  if [ -e "$st/state/.afk" ] \
+     && printf '%s' "$out" | grep -F 'unsubmitted text' >/dev/null \
+     && printf '%s' "$out" | grep -F 'already active' >/dev/null \
+     && ! printf '%s' "$out" | grep -F 'refusing to start away mode' >/dev/null; then
+    pass "pre-flight: a re-entry over an armed away mode re-arms the supervisor and reports the blocked path"
+  else
+    fail "pre-flight: a re-entry over an armed away mode refused instead of reporting ($out)"
+  fi
   preflight_stop "$st" "$pane"
   rm -rf "$st/state"; mkdir -p "$st/state"
 

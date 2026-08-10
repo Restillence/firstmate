@@ -401,7 +401,9 @@ Two facts this pins:
 - `herdr notification show` exits 0 while reporting `shown:false`, so exit status must never count as delivery.
 
 Resulting classification on that host: `osascript` unavailable (not macOS), `notify-send` unavailable (no service owner), `herdr` unproven from a probe and unavailable once a real check notification is refused.
-That host therefore has no reachable alert channel, and away-mode entry refuses rather than starting a supervisor that could only leave a durable record.
+That host therefore has no reachable alert channel, and a first away-mode entry refuses rather than starting a supervisor that could only leave a durable record.
+A re-entry over an already-armed away mode reports the same verdict and re-arms the supervisor anyway, so no restart can leave the flag set with no daemon.
+The check notification that resolves an `unproven` channel is titled as a channel check on every carrier, never as a wedge alarm.
 
 ### Away-mode entry pre-flight, per harness
 

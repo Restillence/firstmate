@@ -34,19 +34,25 @@ Each directive is therefore classified by probing the thing that carries the not
 | directive | `available` when | `unavailable` when | `unproven` when |
 | --- | --- | --- | --- |
 | `osascript` | macOS with `osascript` installed | not macOS, or not installed | - |
-| `notify-send` | installed and `org.freedesktop.Notifications` has an owner on the session bus | installed with no owner, or not installed | installed but no `gdbus`, `busctl`, or `dbus-send` can answer |
-| `herdr` | - | not installed, or no herdr server running | a herdr server is running |
+| `notify-send` | installed and `org.freedesktop.Notifications` has an owner on the session bus | installed with no owner, or not installed | installed but no `gdbus`, `busctl`, or `dbus-send` can answer, or the one that ran did not answer within the watchdog |
+| `herdr` | - | not installed, or no herdr server running | a herdr server is running, or `herdr status` did not answer within the watchdog |
 | `command:<cmd>` | a command is present, which is the captain's own assertion | the directive carries no command | - |
+
+A carrier probe is run under the same process-group watchdog as the notifiers, because the probes sit on the daemon's own alarm path and a hung session bus or herdr server would otherwise block the single-threaded housekeeping loop during the alarm.
+A probe the watchdog stops is `unproven`, never `available`: the safe direction is to leave the doubt for the self-test or the alarm's own delivery attempt to resolve.
 
 `herdr` is never better than `unproven` from a probe because `herdr notification show` exits 0 while reporting `{"shown":false,"reason":"disabled"}`, so its exit status cannot distinguish a delivered notification from a suppressed one.
 The notifier reads herdr's own `shown` field instead, and away-mode entry resolves the remaining doubt by delivering one clearly-labeled check notification.
+
+That check carries its own title and body on every carrier - "firstmate: away-mode alert channel check (nothing is wrong)" - and never the alarm's "firstmate: away-mode escalations WEDGED".
+It is delivered on every away-mode entry, every idempotent refresh, and every `preflight` report, so wearing the alarm's title would teach the captain to dismiss on sight the one notification this alarm exists to make credible.
 
 At alarm time every resolved channel is attempted regardless of its classification: attempting costs nothing, a probe can be stale, and the alarm is the last line of defence.
 The classification decides what `auto` resolves to and what the entry pre-flight reports.
 
 Each channel is best-effort.
 A missing binary or non-zero exit logs a warning and continues to the next channel without crashing the daemon loop.
-Every invocation is process-group bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS`, which defaults to 10 seconds, including `command:`, `osascript`, `notify-send`, `herdr`, and the test seam.
+Every invocation is process-group bounded by `FM_WEDGE_ALARM_TIMEOUT_SECS`, which defaults to 10 seconds, including `command:`, `osascript`, `notify-send`, `herdr`, the carrier probes above, and the test seam.
 On timeout or daemon shutdown, the notifier process group is terminated and the next configured channel may run.
 AppleScript receives the summary as an argv item rather than interpolated source, so summary text cannot alter the script.
 See [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
@@ -58,7 +64,9 @@ When no configured or resolved channel delivers, the alarm records an `ALERT UNR
 A delivered alarm names its channel there instead, and a configured `off` records the captain's own choice.
 
 That is the last-resort record, not the fix.
-The fix is that away-mode entry refuses to start a supervisor whose alarm cannot reach anyone; see the `/afk` skill for the entry contract and `bin/fm-afk-launch.sh preflight` to ask the same question at any time.
+The fix is that a FIRST away-mode entry refuses to start a supervisor whose alarm cannot reach anyone, while the captain is still there to fix it.
+A re-entry over an away mode that is already armed reports the same failure just as loudly and still re-arms the supervisor, because refusing there would leave away mode flagged active with no daemon left to raise any alarm at all.
+See the `/afk` skill for the entry contract and `bin/fm-afk-launch.sh preflight` to ask the same question at any time.
 
 ## Test safety
 

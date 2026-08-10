@@ -114,7 +114,7 @@ Beyond the durable `state/.subsuper-inject-wedged` marker and the tmux status-li
 Directives are `off` (a position-independent kill switch that disables every active alert), `auto`/`default`, `osascript` (macOS Notification Center banner), `notify-send` (freedesktop desktop notification), `herdr` (herdr UI notification), and `command:<cmd>` (run `<cmd>` via `sh -c`, summary on `$1` and stdin).
 An absent file means `auto`, which resolves this platform's own reachable channels and is default-on wherever one resolves: the alarm exists precisely so a wedged away-mode primary is never silent, and it fires at most once per max-defer window after a genuine wedge.
 A missing or failing channel logs and falls through to the next, never crashing the daemon, and an alarm that no channel carries records itself as unreachable rather than passing for a delivered one.
-Away-mode entry refuses to start a supervisor with no reachable channel, so this is settled before the captain walks away rather than during a wedge.
+A first away-mode entry refuses to start a supervisor with no reachable channel, so this is settled before the captain walks away rather than during a wedge; a re-entry over an already-armed away mode reports it and re-arms anyway.
 See [`wedge-alarm.md`](wedge-alarm.md) for the current channel reference and carrier probes, [`verification/supervision.md`](verification/supervision.md#wedge-alarm-channels) for active evidence, and [`examples/wedge-alarm`](examples/wedge-alarm) for a copyable config.
 
 ## Trace context propagation (config/trace-context / FM_TRACE_CONTEXT)
@@ -599,7 +599,7 @@ FM_ESCALATE_BATCH_SECS=90          # buffer window for batched escalation digest
 FM_MAX_DEFER_SECS=300              # max buffered escalation age before retry plus wedge alarm; 0 disables
 FM_WEDGE_ALARM_CHANNEL=            # override config/wedge-alarm with one active-alert directive for the wedge alarm; off|auto|osascript|notify-send|herdr|command:<cmd>; absent = auto (this platform's own reachable channels)
 FM_WEDGE_ALARM_EXEC=              # notifier seam: route every channel (osascript, notify-send, herdr, command:) through this command as `<cmd> <channel> <summary>`; "discard" fires nothing; unset in production; anything other than the executed daemon or away launcher defaults it to "discard" so no test posts a real notification (docs/wedge-alarm.md)
-FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, notify-send, herdr, override, or command: notifier before its watchdog terminates it and continues to the next channel; invalid or zero values use 10
+FM_WEDGE_ALARM_TIMEOUT_SECS=10    # maximum seconds for each osascript, notify-send, herdr, override, or command: notifier, and for each carrier probe, before its watchdog terminates it and continues; invalid or zero values use 10
 FM_INJECT_FAIL_SLEEP=30            # seconds to back off when the supervisor pane is unavailable
 FM_INJECT_CONFIRM_RETRIES=3        # daemon Enter-retry attempts after typing a digest once
 FM_INJECT_CONFIRM_SLEEP=0.5        # seconds between daemon submit checks

@@ -18,9 +18,9 @@
 #
 # An ABSENT config/wedge-alarm behaves as `auto`, default-on wherever a channel
 # resolves: the alarm exists precisely so a wedged away-mode primary is never
-# silent. Away-mode entry refuses to start when no channel can reach you, so set
-# a command: line below (or `off` to accept the durable record alone) on a host
-# with no desktop notification service.
+# silent. A first away-mode entry refuses to start when no channel can reach
+# you, so set a command: line below (or `off` to accept the durable record
+# alone) on a host with no desktop notification service.
 #
 # Example: a macOS banner plus a push to a phone via ntfy.sh, so a wedge that
 # happens overnight reaches you even away from the machine.
