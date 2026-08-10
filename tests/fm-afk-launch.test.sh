@@ -7,6 +7,11 @@
 #   fresh entry vs a refresh, and the correct-ordered stop (daemon SIGTERM'd
 #   while state/.afk is still present, .afk cleared last).
 #
+#   ENTRY PRE-FLIGHT (always run, real tmux): away mode refuses to start when
+#   its delivery path is already blocked - unsubmitted text in the supervisor
+#   composer, or no alert channel that can reach the captain - and starts when
+#   both hold. Driven with real tmux panes and real processes, no harness.
+#
 #   E2E TOPOLOGY (per backend, skipped when its tool is absent): the anti-
 #   regression for the pane split/shrink - entering AND exiting away mode leaves
 #   the captain's active tab topology UNCHANGED, because the daemon lands in a
@@ -26,6 +31,15 @@ START="$ROOT/bin/fm-afk-start.sh"
 FAILED=0
 fail() { printf 'not ok - %s\n' "$1" >&2; FAILED=1; }
 pass() { printf 'ok - %s\n' "$1"; }
+
+# Notifier safety. bin/fm-afk-launch.sh is one of the two executed programs
+# allowed to fire a REAL notification (bin/fm-wedge-alarm-lib.sh's foot guard),
+# because its pre-flight self-tests a channel nothing short of delivering can
+# decide. A test runs it as a subprocess, so this file sets the seam itself:
+# discard fires nothing, and `off` keeps every case that is not ABOUT the alarm
+# from depending on what this machine happens to have installed.
+export FM_WEDGE_ALARM_EXEC=discard
+export FM_WEDGE_ALARM_CHANNEL=off
 
 SLEEPER=$(mktemp "${TMPDIR:-/tmp}/fm-afk-sleeper.XXXXXX")
 printf '#!/usr/bin/env bash\nexec sleep 600\n' > "$SLEEPER"
@@ -218,7 +232,7 @@ unit_failed_start_rolls_back_state() {
   printf 'pending\n' > "$st/state/.subsuper-escalations"
   printf 'wedged\n' > "$st/state/.subsuper-inject-wedged"
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
-    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start >/dev/null 2>&1; then
+    FM_SUPERVISOR_BACKEND=unsupported "$LAUNCH" start --force >/dev/null 2>&1; then
     fail "failed start: unsupported backend unexpectedly succeeded"
   elif [ ! -e "$st/state/.afk" ] \
     && [ "$(cat "$st/state/.subsuper-escalations")" = pending ] \
@@ -239,9 +253,9 @@ unit_concurrent_start_serialized() {
   TRACK_TMUX_SESSIONS="$TRACK_TMUX_SESSIONS $cap_session"
   cap_pane=$(tmux display-message -p -t "$cap_session" '#{pane_id}')
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$cap_pane" \
-    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 & first=$!
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start --force >/dev/null 2>&1 & first=$!
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET="$cap_pane" \
-    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start >/dev/null 2>&1 & second=$!
+    FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" "$LAUNCH" start --force >/dev/null 2>&1 & second=$!
   wait "$first"; wait "$second"
   rec=$(cut -f2 "$st/state/.afk-daemon-terminal" 2>/dev/null || true)
   count=$(tmux list-sessions -F '#{session_name}' 2>/dev/null | awk -v expected="$rec" '$0 == expected {n++} END{print n+0}')
@@ -485,7 +499,7 @@ unit_native_lifecycle() {
   st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-native.XXXXXX")
   mkdir -p "$st/state"
   : > "$st/state/.subsuper-escalations"
-  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native >/dev/null 2>&1 \
+  if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" "$LAUNCH" start-native --force >/dev/null 2>&1 \
     && [ "$(cut -f1 "$st/state/.afk-daemon-terminal")" = none ] \
     && [ -e "$st/state/.afk" ] \
     && [ ! -e "$st/state/.subsuper-escalations" ]; then
@@ -740,7 +754,7 @@ unit_refresh_validates_record() {
   if FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" FM_SUPERVISOR_TARGET=unused \
     FM_SUPERVISOR_BACKEND=tmux bash -c '
       . "$1"
-      ! fm_afk_launch_start && ! fm_afk_launch_start_native
+      ! fm_afk_launch_start 1 && ! fm_afk_launch_start_native 1
     ' _ "$LAUNCH" && [ ! -e "$st/state/.afk" ]; then
     pass "refresh record: malformed terminal identity fails closed"
   else
@@ -760,7 +774,7 @@ unit_clear_failure_aborts_entry() {
     . "$1"
     fm_afk_launch_reconcile() { return 0; }
     fm_afk_clear_stale_artifacts() { return 1; }
-    ! fm_afk_launch_start_native
+    ! fm_afk_launch_start_native 1
   ' _ "$LAUNCH" && [ ! -e "$st/state/.afk" ] && [ -e "$st/state/.subsuper-escalations" ]; then
     pass "clear failure: native entry aborts and restores prior state"
   else
@@ -812,13 +826,186 @@ unit_flag_write_failure_aborts() {
   FM_HOME="$st" FM_STATE_OVERRIDE="$st/state" bash -c '
     . "$1"
     fm_afk_launch_flag_write() { return 1; }
-    ! fm_afk_launch_start_native
+    ! fm_afk_launch_start_native 1
   ' _ "$LAUNCH"
   if [ ! -e "$st/state/.afk" ] && [ ! -e "$st/state/.afk-daemon-terminal" ]; then
     pass "flag failure: lifecycle aborts without active state"
   else
     fail "flag failure: lifecycle reported active state"
   fi
+  rm -rf "$st"
+}
+
+# ---------------------------------------------------------------------------
+# ENTRY PRE-FLIGHT: away mode must prove its delivery path before it reports
+# itself active (task fm-afk-wedge-unreachable). Each case drives a REAL tmux
+# pane whose cursor row is a real composer, so the verdict comes from the same
+# bin/fm-backend.sh classifier the daemon's injection guard will use, not from a
+# stub that could only confirm its own assumption.
+# ---------------------------------------------------------------------------
+PREFLIGHT_SOCKET=""
+PREFLIGHT_SHIM=""
+PREFLIGHT_PANE=""
+
+# A minimal composer: it holds the cursor on a row it redraws itself, so the row
+# is blank until something is typed into it and carries that text afterwards.
+# Sets PREFLIGHT_PANE/SOCKET/SHIM in the CALLER, so it must not be invoked in a
+# command substitution.
+preflight_pane_start() {
+  local loop pane real_tmux
+  real_tmux=$(command -v tmux)
+  PREFLIGHT_SOCKET="fm-afk-preflight-$$-$RANDOM"
+  PREFLIGHT_SHIM=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-preflight-shim.XXXXXX")
+  loop="$PREFLIGHT_SHIM/composer.sh"
+  cat > "$loop" <<'LOOP'
+#!/usr/bin/env bash
+_buf=
+printf '\r\033[K'
+while IFS= read -r -n 1 _ch; do
+  if [ -z "$_ch" ]; then _buf=; printf '\r\033[K'; continue; fi
+  case "$_ch" in
+    $'\r'|$'\n') _buf=; printf '\r\033[K' ;;
+    *) _buf="${_buf}${_ch}"; printf '\r\033[K%s' "$_buf" ;;
+  esac
+done
+LOOP
+  chmod +x "$loop"
+  cat > "$PREFLIGHT_SHIM/tmux" <<SHIM
+#!/usr/bin/env bash
+exec "$real_tmux" -L "$PREFLIGHT_SOCKET" "\$@"
+SHIM
+  chmod +x "$PREFLIGHT_SHIM/tmux"
+  "$real_tmux" -L "$PREFLIGHT_SOCKET" new-session -d -s captain -x 120 -y 30 || return 1
+  pane=$("$real_tmux" -L "$PREFLIGHT_SOCKET" display-message -p -t captain '#{pane_id}')
+  "$real_tmux" -L "$PREFLIGHT_SOCKET" send-keys -t "$pane" "bash '$loop'" Enter
+  sleep 1
+  PREFLIGHT_PANE=$pane
+}
+
+preflight_pane_type() {  # <pane> <text>
+  "$PREFLIGHT_SHIM/tmux" send-keys -t "$1" -l "$2"
+  sleep 0.5
+}
+
+preflight_pane_stop() {
+  [ -n "$PREFLIGHT_SOCKET" ] && "$PREFLIGHT_SHIM/tmux" kill-server 2>/dev/null
+  rm -rf "$PREFLIGHT_SHIM" 2>/dev/null || true
+  PREFLIGHT_SOCKET=""; PREFLIGHT_SHIM=""; PREFLIGHT_PANE=""
+}
+
+preflight_run() {  # <state-home> <pane> <channel> [extra-args...] -> combined output
+  local home=$1 pane=$2 channel=$3
+  shift 3
+  PATH="$PREFLIGHT_SHIM:$PATH" FM_HOME="$home" FM_STATE_OVERRIDE="$home/state" \
+    FM_SUPERVISOR_TARGET="$pane" FM_SUPERVISOR_BACKEND=tmux \
+    FM_WEDGE_ALARM_CHANNEL="$channel" FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
+    "$LAUNCH" "$@" 2>&1
+}
+
+preflight_stop() {  # <state-home> <pane>
+  local rec
+  rec=$(cut -f2 "$1/state/.afk-daemon-terminal" 2>/dev/null || true)
+  PATH="$PREFLIGHT_SHIM:$PATH" FM_HOME="$1" FM_STATE_OVERRIDE="$1/state" \
+    FM_SUPERVISOR_TARGET="$2" FM_SUPERVISOR_BACKEND=tmux "$LAUNCH" stop >/dev/null 2>&1 || true
+  [ -z "$rec" ] || "$PREFLIGHT_SHIM/tmux" kill-session -t "$rec" 2>/dev/null || true
+}
+
+preflight_cases() {
+  command -v tmux >/dev/null 2>&1 || { echo "skip: tmux not found (entry pre-flight)"; return 0; }
+  local st pane out
+  st=$(mktemp -d "${TMPDIR:-/tmp}/fm-afk-preflight.XXXXXX")
+  mkdir -p "$st/state"
+  preflight_pane_start || { fail "pre-flight: could not create a real composer pane"; rm -rf "$st"; return 0; }
+  pane=$PREFLIGHT_PANE
+  # Guard against a vacuous run: every case below reads its verdict from this
+  # pane, so a pane that never presents an empty composer would make the whole
+  # section prove nothing.
+  if [ "$(PATH="$PREFLIGHT_SHIM:$PATH" bash -c ". '$ROOT/bin/fm-backend.sh'; fm_backend_composer_state tmux '$pane'")" != empty ]; then
+    fail "pre-flight: the test composer pane never read as empty, so these cases would prove nothing"
+    preflight_pane_stop
+    rm -rf "$st"
+    return 0
+  fi
+
+  # 1. A clear composer and a reachable alert channel: away mode starts.
+  out=$(preflight_run "$st" "$pane" 'command:true' start)
+  if [ -e "$st/state/.afk" ]; then
+    pass "pre-flight: an empty composer and a reachable alert channel start away mode"
+  else
+    fail "pre-flight: refused a healthy delivery path ($out)"
+  fi
+  preflight_stop "$st" "$pane"
+  rm -rf "$st/state"; mkdir -p "$st/state"
+
+  # 2. Real unsubmitted text: entry refuses, names the condition, writes nothing.
+  #    This is the 2026-08-09 incident's own starting state.
+  preflight_pane_type "$pane" "here is my runpod api key:"
+  out=$(preflight_run "$st" "$pane" 'command:true' start)
+  if [ ! -e "$st/state/.afk" ] \
+     && printf '%s' "$out" | grep -F 'unsubmitted text' >/dev/null \
+     && printf '%s' "$out" | grep -F 'refusing to start away mode' >/dev/null; then
+    pass "pre-flight: unsubmitted supervisor text refuses entry and names the blocked delivery path"
+  else
+    fail "pre-flight: unsubmitted supervisor text did not refuse entry ($out)"
+  fi
+
+  # 3. The same blocked composer with --force: the captain's explicit override
+  #    starts away mode and the override is stated, never silent.
+  out=$(preflight_run "$st" "$pane" 'command:true' start --force)
+  if [ -e "$st/state/.afk" ] && printf '%s' "$out" | grep -F 'OVERRIDDEN by --force' >/dev/null; then
+    pass "pre-flight: --force starts away mode and records that the check was overridden"
+  else
+    fail "pre-flight: --force did not start away mode or did not state the override ($out)"
+  fi
+  preflight_stop "$st" "$pane"
+  rm -rf "$st/state"; mkdir -p "$st/state"
+
+  # Clear the composer again for the alarm-channel cases.
+  "$PREFLIGHT_SHIM/tmux" send-keys -t "$pane" Enter
+  sleep 0.5
+
+  # 4. No alert channel can deliver: entry refuses even though the composer is
+  #    clear, because a supervisor that cannot raise an alarm is the other half
+  #    of the same incident.
+  out=$(preflight_run "$st" "$pane" 'command:' start)
+  if [ ! -e "$st/state/.afk" ] \
+     && printf '%s' "$out" | grep -F 'no alert channel can reach you' >/dev/null; then
+    pass "pre-flight: an unreachable alert channel refuses entry"
+  else
+    fail "pre-flight: an unreachable alert channel did not refuse entry ($out)"
+  fi
+
+  # 4b. A configured alert command can carry a pager token, so the report names
+  #     the channel without echoing the directive back.
+  out=$(preflight_run "$st" "$pane" 'command:true # https://pager.example.invalid/t=private-token' preflight)
+  if printf '%s' "$out" | grep -F 'private-token' >/dev/null; then
+    fail "pre-flight: the report echoed the configured alert command back ($out)"
+  else
+    pass "pre-flight: the report names the alert channel without echoing its configured command"
+  fi
+
+  # 5. `off` is the captain's own consent to the durable record alone, so entry
+  #    proceeds and says so rather than refusing.
+  out=$(preflight_run "$st" "$pane" off start)
+  if [ -e "$st/state/.afk" ] \
+     && printf '%s' "$out" | grep -F 'active alerts are turned off' >/dev/null; then
+    pass "pre-flight: configured-off alerts are consent, not a blocker"
+  else
+    fail "pre-flight: configured-off alerts did not start away mode ($out)"
+  fi
+  preflight_stop "$st" "$pane"
+  rm -rf "$st/state"; mkdir -p "$st/state"
+
+  # 6. The report-only command answers the same question and changes nothing.
+  preflight_pane_type "$pane" "half typed"
+  out=$(preflight_run "$st" "$pane" 'command:true' preflight)
+  if [ ! -e "$st/state/.afk" ] && printf '%s' "$out" | grep -F 'unsubmitted text' >/dev/null; then
+    pass "pre-flight: the report-only command reports the blocked path without entering away mode"
+  else
+    fail "pre-flight: the report-only command entered away mode or stayed silent ($out)"
+  fi
+
+  preflight_pane_stop
   rm -rf "$st"
 }
 
@@ -859,7 +1046,7 @@ e2e_herdr() {
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
     FM_SUPERVISOR_TARGET="$target" FM_SUPERVISOR_BACKEND=herdr FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
-    "$LAUNCH" start >/dev/null 2>&1
+    "$LAUNCH" start --force >/dev/null 2>&1
 
   during=$(fm_backend_herdr_cli "$SESSION" pane list --workspace "$cap_ws" 2>/dev/null | jq --arg t "$cap_tab" '[.result.panes[]?|select(.tab_id==$t)]|length')
   ws_during=$(fm_backend_herdr_cli "$SESSION" workspace list 2>/dev/null | jq '[.result.workspaces[]?]|length')
@@ -899,7 +1086,7 @@ e2e_tmux() {
 
   FM_HOME="$home_tmp" FM_STATE_OVERRIDE="$home_tmp/state" \
     FM_SUPERVISOR_TARGET="$cap_pane" FM_SUPERVISOR_BACKEND=tmux FM_AFK_LAUNCH_ENTRY="$SLEEPER" \
-    "$LAUNCH" start >/dev/null 2>&1
+    "$LAUNCH" start --force >/dev/null 2>&1
 
   during=$(tmux list-panes -t "$cap_session" | wc -l | tr -d ' ')
   rec=$(cut -f2 "$home_tmp/state/.afk-daemon-terminal" 2>/dev/null || true)
@@ -951,6 +1138,7 @@ unit_clear_failure_aborts_entry
 unit_confirmed_absence_succeeds
 unit_incomplete_restore_retains_backup
 unit_flag_write_failure_aborts
+preflight_cases
 e2e_herdr
 e2e_tmux
 

@@ -179,7 +179,7 @@ family_for_basename() {
     fm-tangle-guard.test.sh|fm-update.test.sh)
       printf '%s\n' session-bootstrap
       ;;
-    fm-afk-pi-herdr-return-e2e.test.sh|\
+    fm-afk-pi-herdr-return-e2e.test.sh|fm-afk-preflight-live-e2e.test.sh|\
     fm-codex-continuity-live-e2e.test.sh|fm-grok-continuity-live-e2e.test.sh|\
     fm-grok-stop-live-e2e.test.sh|fm-harness-liveness-drift-live-e2e.test.sh|\
     fm-muse-signals-live-e2e.test.sh|\
@@ -882,6 +882,15 @@ families_for_changed_path() {
     bin/fm-afk*)
       printf '%s\n' afk
       printf '%s\n' real-herdr-gated
+      printf '%s\n' live-harness-optin
+      ;;
+    bin/fm-wedge-alarm-lib.sh)
+      # The wedge alarm's channel owner is shared by the daemon and the
+      # away-mode entry pre-flight, and its per-harness/per-platform verdict is
+      # only measurable against real harnesses and a real carrier.
+      printf '%s\n' watcher-wake-lock
+      printf '%s\n' afk
+      printf '%s\n' live-harness-optin
       ;;
     bin/fm-supervisor-target-lib.sh)
       printf '%s\n' watcher-wake-lock

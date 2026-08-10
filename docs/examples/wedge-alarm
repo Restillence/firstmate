@@ -6,15 +6,21 @@
 # Directives:
 #   off              position-independent kill switch: disable every active
 #                    alert (the durable marker and tmux status-line flash remain)
-#   auto | default   platform default: macOS -> osascript; other platforms have
-#                    no built-in OS channel (configure a command: line instead)
+#   auto | default   this platform's own reachable channels, in order:
+#                    macOS -> osascript then herdr; elsewhere -> notify-send
+#                    then herdr. A candidate whose carrier is positively
+#                    disproven is dropped rather than proposed.
 #   osascript        macOS Notification Center banner (backend-independent)
+#   notify-send      freedesktop desktop notification (Linux/BSD counterpart)
 #   herdr            herdr UI notification (herdr notification show)
 #   command:<cmd>    run <cmd> via `sh -c`; the alarm summary is passed as $1 and
 #                    on stdin, so it can reach a phone/pager while you are away
 #
-# An ABSENT config/wedge-alarm behaves as `auto` (default-on on macOS): the
-# alarm exists precisely so a wedged away-mode primary is never silent.
+# An ABSENT config/wedge-alarm behaves as `auto`, default-on wherever a channel
+# resolves: the alarm exists precisely so a wedged away-mode primary is never
+# silent. Away-mode entry refuses to start when no channel can reach you, so set
+# a command: line below (or `off` to accept the durable record alone) on a host
+# with no desktop notification service.
 #
 # Example: a macOS banner plus a push to a phone via ntfy.sh, so a wedge that
 # happens overnight reaches you even away from the machine.

@@ -20,8 +20,15 @@ batched digest rather than per-wake injections.
 
 1. **Enter the lifecycle through `bin/fm-afk-launch.sh`.**
    This owns the durable state write, session-scoped stale-artifact clearing,
-   terminal record, and rollback.
+   terminal record, rollback, and the entry pre-flight below.
    The flag survives a firstmate restart, so recovery re-enters afk when it is present.
+
+   **The entry pre-flight can refuse, and a refusal is the answer.**
+   Away mode is only as good as its delivery path, so entry proves that path before anything reports away mode active: the supervisor composer must read affirmatively empty, and an active alert must be able to reach the captain (or be explicitly turned off, which is the captain's own consent to the durable record alone).
+   On a refusal, relay the concrete condition and its fix to the captain in section 9 language and do not report away mode active.
+   Never re-run with `--force` on your own judgement: that override starts a supervisor that may never deliver, so it needs the captain's explicit word.
+   `--force` never relaxes the injection guard - the daemon still defers rather than typing over a captain's line - it only starts away mode anyway.
+   `bin/fm-afk-launch.sh preflight` reports the same verdict without changing anything.
 
 2. **Ensure the sub-supervisor daemon is running as a tracked background process.**
    Its hosting differs by harness.
@@ -52,7 +59,7 @@ batched digest rather than per-wake injections.
 3. **Do not separately arm `fm-watch.sh`.** The daemon manages the watcher as
    its child; the singleton lock no-ops a stray arm harmlessly.
 
-4. **Acknowledge** in `AGENTS.md` section 9 language: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
+4. **Acknowledge** in `AGENTS.md` section 9 language, but only once the lifecycle actually started: "Captain, away mode is active; I will batch routine updates and surface only decisions, failures, credentials, or review-ready work until you return."
 
 ## How to exit afk
 
@@ -111,7 +118,8 @@ If that submit cannot be confirmed, it raises a loud, rate-limited wedge alarm:
 an ERROR in the daemon log, a durable
 `state/.subsuper-inject-wedged` marker (surface it on the "while you were out"
 catch-up if present), a tmux status-line flash when applicable, and a configurable backend-independent active alert.
-`docs/wedge-alarm.md` owns the alert channel setup, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
+The marker's first line states whether that alert reached anyone, so an alarm no channel could carry reads as `ALERT UNREACHABLE` rather than passing for a delivered one.
+`docs/wedge-alarm.md` owns the alert channel setup and the carrier probes the entry pre-flight shares, and `docs/verification/supervision.md` "Wedge-alarm channels" owns active evidence.
 So a guard false-positive becomes a visible stall, never an unbounded silent no-op.
 
 ## Submit model
@@ -194,10 +202,11 @@ the operational prefix lets firstmate distinguish it from a real captain message
   buffered past `FM_MAX_DEFER_SECS` (default 300s), the daemon attempts one
   normal flush, which still requires an idle pane and an affirmatively empty composer. If that
   cannot confirm a submit, it raises a loud, rate-limited wedge alarm: ERROR log,
-  durable `state/.subsuper-inject-wedged` marker, a tmux status-line flash when
-  applicable, and a backend-independent active alert. A
-  composer false-positive surfaces as a visible stall, never an unbounded silent
-  no-op.
+  durable `state/.subsuper-inject-wedged` marker carrying the alert outcome on its
+  first line, a tmux status-line flash when applicable, and a backend-independent
+  active alert. A composer false-positive surfaces as a visible stall, never an
+  unbounded silent no-op. The alarm is a last resort, not the plan: the entry
+  pre-flight in step 1 is what keeps away mode from starting blocked.
 - **Verified type-once submit model** - the digest is typed once (`send-keys -l`
   on tmux, `pane send-text` on herdr), then submitted with Enter and verified.
   Enter is retried, Enter only and never a retype, until the backend submit
