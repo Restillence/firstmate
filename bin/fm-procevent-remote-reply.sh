@@ -70,6 +70,11 @@ DOCUMENT_LOCAL_FAILURE=2
 . "$SCRIPT_DIR/fm-secondmate-registry-lib.sh"
 # shellcheck source=bin/fm-pending-reply-lib.sh
 . "$SCRIPT_DIR/fm-pending-reply-lib.sh"
+# Sourced explicitly for fm_status_append rather than relied on transitively
+# through the library above: a mirrored remote line lands in the parent's own
+# decision ledger, so it must never weld onto an unterminated last line.
+# shellcheck source=bin/fm-classify-lib.sh
+. "$SCRIPT_DIR/fm-classify-lib.sh"
 
 die() { printf 'error: %s\n' "$1" >&2; exit 1; }
 usage() { sed -n '2,49p' "$0" | sed 's/^# \{0,1\}//'; exit 2; }
@@ -285,7 +290,7 @@ normalize_payload() { # <source> <destination>
 # Returns 0 appended, 1 already present, 2 the write itself failed.
 append_status_once() { # <status-file> <line>
   grep -Fqx -- "$2" "$1" 2>/dev/null && return 1
-  printf '%s\n' "$2" >> "$1" || return 2
+  fm_status_append "$1" "$2" || return 2
   return 0
 }
 

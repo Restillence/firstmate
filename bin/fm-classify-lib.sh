@@ -160,12 +160,22 @@ status_is_paused_or_captain_held() {  # <status-line>
 # rule 6), so closure never depends on a busy worker's discipline.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
-# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
+# format): an OPTIONAL "[key=<slug>]" token sits on either side of the colon,
 #   needs-decision [key=api-shape]: <summary>
+#   needs-decision: [key=api-shape] <summary>
 #   resolved       [key=api-shape]: <how it was decided>
+# Both positions name the same key. Accepting both is a correctness requirement,
+# not a convenience: every writer in bin/ emits the pre-colon form, but a human
+# or worker hand-appending a line reads the token as part of the note and writes
+# it after the colon. Recognizing only the pre-colon position silently folded
+# every such line onto the key "default" while the note still displayed the
+# intended slug - so the drain listed a decision that LOOKED keyed, and
+# fm-send's --resolve-key then correctly refused a key nothing had ever opened.
+# The token is recognized after the colon only when it BEGINS the note, so an
+# incidental "[key=...]" later in prose is left alone.
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
-# The three parsers are pure reads of a single line; the verb parser strips any
+# The parsers are pure reads of a single line; the verb parser strips any
 # key token before the colon so the leading word is recovered cleanly.
 status_line_verb() {  # <status-line> -> leading verb word
   local v=${1%%:*}
@@ -181,19 +191,69 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
   esac
 }
 _fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
+  local prefix=${1%%:*} k note
   case "$prefix" in
     *\[key=*\]*)
       k=${prefix#*\[key=}
       k=${k%%\]*}
-      case "$k" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
+      ;;
+    *)
+      note=$(status_line_note "$1")
+      case "$note" in
+        \[key=*\]*)
+          k=${note#\[key=}
+          k=${k%%\]*}
+          ;;
+        *) printf 'default'; return 0 ;;
       esac
       ;;
-    *) printf 'default' ;;
+  esac
+  case "$k" in
+    ''|*[!A-Za-z0-9._-]*) return 1 ;;
+    *) printf '%s' "$k" ;;
   esac
 }
+# The note a decision record carries: status_line_note minus a leading
+# "[key=<slug>]" token, so a post-colon-keyed line records the same note its
+# pre-colon-keyed twin does. Without this the token would be stored in the note
+# AND rendered again as the key, and a reserved key's own vocabulary check
+# (_fm_decision_key_transition_allowed below) would never see the note it reads.
+_fm_decision_note() {  # <status-line> -> note with a leading key token removed
+  local n
+  n=$(status_line_note "$1")
+  case "$n" in
+    \[key=*\]*)
+      n=${n#*\]}
+      n=${n#"${n%%[![:space:]]*}"}
+      ;;
+  esac
+  printf '%s' "$n"
+}
+# Append one line to a status stream so it can never weld onto an unterminated
+# last line. A status file has many independent appenders - fm-send's
+# answer-time close, the decision-hold transfer, the pending-reply library, the
+# remote-reply mirror, and a worker's own `echo >>` - and a worker's shell can
+# leave the file with no trailing newline (a `printf` without one, or a killed
+# write). A plain `>>` then joins the new line onto the previous one, producing
+# ONE line carrying two verbs. That is precisely how the two folds below come to
+# disagree: the whole-file fold re-reads the welded line, sees the OLDER verb
+# first, and still reports the decision open, while the cursor-backed fold has
+# already consumed the earlier bytes and folds only the appended remainder, so
+# it reports the same decision closed. Terminating first is what keeps every
+# consumer of this stream reading the same records.
+fm_status_append() {  # <status-file> <line>
+  local f=$1 line=$2 last
+  if [ -s "$f" ]; then
+    # The trailing `x` survives command substitution's newline stripping, so a
+    # final newline is still distinguishable from a final ordinary byte.
+    last=$(LC_ALL=C tail -c 1 "$f" 2>/dev/null; printf x) || return 1
+    if [ "$last" != $'\n'x ]; then
+      printf '\n' >> "$f" || return 1
+    fi
+  fi
+  printf '%s\n' "$line" >> "$f"
+}
+
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
@@ -258,11 +318,11 @@ _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
   verb=$(status_line_verb "$line")
   key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
-  _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
+  _fm_decision_key_transition_allowed "$key" "$(_fm_decision_note "$line")" \
     || { printf '%s' "$open"; return 0; }
   case "$verb" in
     needs-decision|blocked)
-      note=$(status_line_note "$line")
+      note=$(_fm_decision_note "$line")
       open=$(_fm_decision_drop "$open" "$key")
       [ -n "$open" ] && open="${open}"$'\n'
       open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
@@ -384,7 +444,12 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=2
+# Bump whenever the fold's per-line semantics change, so a cursor persisted
+# under the old rule is invalidated and its file re-folded from byte 0 instead
+# of serving a stale open set. Version 3 recognizes a post-colon "[key=<slug>]"
+# token (see the decision key grammar above); a version-2 cursor's already-folded
+# bytes were keyed under the old rule and must not be trusted.
+FM_OPEN_DECISIONS_FOLD_VERSION=3
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure

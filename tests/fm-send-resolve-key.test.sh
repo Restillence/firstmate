@@ -96,6 +96,17 @@ run_send() {
     "$SEND" "$@" 2>/dev/null
 }
 
+# run_send_err <fakebin> <home> <send-log> <err-file> <fm-send args...>: run_send
+# with the guard/refusal diagnostic captured instead of discarded, for the legs
+# that assert on what the refusal actually says.
+run_send_err() {
+  local fb=$1 home=$2 log=$3 err=$4; shift 4
+  : > "$log"
+  env PATH="$fb:$PATH" \
+    FM_ROOT_OVERRIDE="$home" FM_HOME="$home" FM_SEND_LOG="$log" FM_SEND_SETTLE=0 \
+    "$SEND" "$@" 2>"$err"
+}
+
 setup_home() {  # <name> -> echoes a fresh home dir with an empty state/
   local home="$TMP_ROOT/$1-$RANDOM"
   mkdir -p "$home/state"
@@ -200,6 +211,130 @@ test_not_open_key_refuses_before_send() {
   printf '%s' "$out" | grep -F '[key=real-key]' >/dev/null \
     || fail "the real decision disappeared after a refused answer: $out"
   pass "fm-send --resolve-key: a key that is not open refuses loudly before anything is sent"
+}
+
+# The reported failure: a captain's answer reached its worker, but --resolve-key
+# refused to close the record, so the decision stayed open in every later drain
+# and the worker had to be told to hand-append its own resolved line. The status
+# line was written with its "[key=<slug>]" token AFTER the colon - the shape a
+# hand-appended line naturally takes - which the fold keyed as "default" while
+# still printing the intended slug inside the note. Both the drain and fm-send
+# agreed on "default"; what disagreed was the slug an operator could SEE and the
+# slug that actually existed. These two tests pin the fix from both ends: the
+# reproduction must now close, and a key that is genuinely not open must still
+# refuse, so the fix cannot regress into resolving whatever it was handed.
+test_post_colon_key_is_resolvable() {
+  local dir fb log home rc out err task
+  dir="$TMP_ROOT/post-colon"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home post-colon)
+
+  # t8 reproduces the observed file byte for byte: the needs-decision line is
+  # the LAST line and the file has no trailing newline. t9 is the same content
+  # terminated, since a final-line read that drops the last unterminated line
+  # would fail only one of the two.
+  fm_write_meta "$home/state/t8.meta" "window=sess:fm-t8" "kind=ship"
+  printf 'working: started\nneeds-decision: [key=composer-nbsp] pick a normalization' \
+    > "$home/state/t8.status"
+  fm_write_meta "$home/state/t9.meta" "window=sess:fm-t9" "kind=ship"
+  printf 'working: started\nneeds-decision: [key=composer-nbsp] pick a normalization\n' \
+    > "$home/state/t9.status"
+
+  for task in t8 t9; do
+    out=$(drain_out "$home")
+    printf '%s' "$out" | grep -F "$task [key=composer-nbsp] needs-decision:" >/dev/null \
+      || fail "$task: precondition - the decision should list under its own key: $out"
+
+    run_send "$fb" "$home" "$log" "$task" --resolve-key composer-nbsp "normalize to NBSP"; rc=$?
+    [ "$rc" -eq 0 ] || fail "$task: answering an open post-colon-keyed decision was refused"
+    grep -F 'normalize to NBSP' "$log" >/dev/null \
+      || fail "$task: the answer was never typed to the worker: $(cat "$log")"
+    grep -F 'resolved [key=composer-nbsp]' "$home/state/$task.status" >/dev/null \
+      || fail "$task: the answer did not close the decision: $(cat "$home/state/$task.status")"
+
+    # Both readers must now agree that it is closed: the drain's cursor-backed
+    # fold drops it, and fm-send's own whole-file fold refuses a second answer.
+    out=$(drain_out "$home")
+    if printf '%s' "$out" | grep -F "$task [key=composer-nbsp]" >/dev/null; then
+      fail "$task: the answered decision still lists as open: $out"
+    fi
+    run_send_err "$fb" "$home" "$log" "$err" "$task" --resolve-key composer-nbsp "again" >/dev/null; rc=$?
+    [ "$rc" -ne 0 ] || fail "$task: re-answering an already-closed decision was allowed"
+  done
+  pass "fm-send --resolve-key: a decision keyed after the colon resolves, terminated or not"
+}
+
+# The other half of the reproduction. A worker's shell can leave its status file
+# with no trailing newline, and a plain `>>` then welds the closing line onto the
+# still-open one, making ONE line that carries two verbs. That single record is
+# where the two folds genuinely diverge: fm-send re-reads the whole file, sees
+# the older needs-decision verb, and still calls the decision open, while the
+# drain's cursor-backed fold consumed the earlier bytes on a previous pass and
+# folds only the appended remainder, so it calls the same decision closed. The
+# assertion is that one answer leaves both readers agreeing it is closed.
+test_close_after_unterminated_line_keeps_both_readers_agreeing() {
+  local dir fb log home rc out err
+  dir="$TMP_ROOT/unterminated"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home unterminated)
+  fm_write_meta "$home/state/t12.meta" "window=sess:fm-t12" "kind=ship"
+  printf 'needs-decision [key=api-shape]: pick REST or RPC' > "$home/state/t12.status"
+
+  # Prime the incremental reader so its cursor already covers the unterminated
+  # line - the state a real drain leaves before the answer is sent.
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F 't12 [key=api-shape]' >/dev/null \
+    || fail "precondition: the decision should list as open before the answer: $out"
+
+  run_send "$fb" "$home" "$log" t12 --resolve-key api-shape "go with REST"; rc=$?
+  [ "$rc" -eq 0 ] || fail "answering a decision on an unterminated status file was refused"
+
+  # Reader one: the drain's cursor-backed fold no longer lists it.
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 't12 [key=api-shape]' >/dev/null; then
+    fail "the drain still lists the answered decision as open: $out"
+  fi
+  # Reader two: fm-send's whole-file fold agrees, and so refuses a second answer.
+  run_send_err "$fb" "$home" "$log" "$err" t12 --resolve-key api-shape "again" >/dev/null; rc=$?
+  [ "$rc" -ne 0 ] || fail "fm-send still considered the answered decision open - the two readers disagree"
+
+  # And the record itself is two lines, not one welded line carrying two verbs.
+  grep -c . "$home/state/t12.status" | grep -qx 2 \
+    || fail "the close welded onto the open line: $(cat -A "$home/state/t12.status")"
+  pass "fm-send --resolve-key: closing on an unterminated status file leaves both readers agreeing"
+}
+
+test_refusal_still_refuses_and_names_what_it_saw() {
+  local dir fb log home rc err out
+  dir="$TMP_ROOT/still-refuses"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home still-refuses)
+
+  # A key opened and closed in the post-colon form is genuinely closed: the
+  # widened grammar must not resurrect it just because the slug appears twice.
+  fm_write_meta "$home/state/t10.meta" "window=sess:fm-t10" "kind=ship"
+  printf 'needs-decision: [key=spent] choose\nresolved: [key=spent] chose A\n' \
+    > "$home/state/t10.status"
+  run_send_err "$fb" "$home" "$log" "$err" t10 --resolve-key spent "answer" >/dev/null; rc=$?
+  [ "$rc" -ne 0 ] || fail "an already-closed post-colon key was accepted"
+  assert_contains "$(cat "$err")" "nothing was sent" "the closed-key refusal should state nothing was sent"
+  [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
+
+  # A key nobody ever opened still refuses, and the refusal names the key that
+  # IS open instead of listing possible causes - the fact an operator needs to
+  # see when the slug they read is not the slug the fold recorded.
+  fm_write_meta "$home/state/t11.meta" "window=sess:fm-t11" "kind=ship"
+  printf 'needs-decision: [key=real-slug] choose\n' > "$home/state/t11.status"
+  run_send_err "$fb" "$home" "$log" "$err" t11 --resolve-key invented "answer" >/dev/null; rc=$?
+  [ "$rc" -ne 0 ] || fail "a never-opened key was accepted"
+  assert_contains "$(cat "$err")" "--resolve-key 'invented'" "the refusal should name the bad key"
+  assert_contains "$(cat "$err")" "real-slug" "the refusal should name the key that is actually open"
+  [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F 't11 [key=real-slug]' >/dev/null \
+    || fail "the real decision disappeared after a refused answer: $out"
+  pass "fm-send --resolve-key: closed and never-opened keys still refuse, naming what is open"
 }
 
 test_failed_send_does_not_close() {
@@ -399,6 +534,9 @@ test_answer_send_closes_open_decision
 test_answer_starts_work_never_orphans
 test_routine_steer_never_closes
 test_not_open_key_refuses_before_send
+test_post_colon_key_is_resolvable
+test_close_after_unterminated_line_keeps_both_readers_agreeing
+test_refusal_still_refuses_and_names_what_it_saw
 test_failed_send_does_not_close
 test_multiple_keys_close_together
 test_local_secondmate_answer_marked_and_closed
