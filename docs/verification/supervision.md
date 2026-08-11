@@ -373,3 +373,53 @@ Observed output:
 ```
 
 The safe command-channel contract is covered without a notification by `tests/fm-daemon.test.sh`: the summary reaches both `$1` and stdin, every channel is process-group bounded, and a failed channel falls through.
+
+### Per-platform channel resolution
+
+A channel's binary being installed is not the same as its carrier working, so `auto` resolves against a probe of the carrier itself.
+Refresh this table with `FM_AFK_PREFLIGHT_LIVE_E2E=1 FM_AFK_PREFLIGHT_LIVE_HERDR_NOTIFY=1 tests/fm-afk-preflight-live-e2e.test.sh`, which fails when a classification stops matching an independent observation.
+
+Linux aarch64 (Ubuntu, kernel 6.8.0-1058-oracle), Herdr 0.7.4, libnotify 0.7.9, measured 2026-08-10:
+
+```sh
+notify-send 'FIRSTMATE TEST - IGNORE' 'wedge alarm channel probe'
+# GDBus.Error:org.freedesktop.DBus.Error.ServiceUnknown: The name
+# org.freedesktop.Notifications was not provided by any .service files
+# exit 1
+
+gdbus call --session --dest org.freedesktop.DBus   --object-path /org/freedesktop/DBus   --method org.freedesktop.DBus.NameHasOwner org.freedesktop.Notifications
+# (false,)
+
+herdr notification show 'FIRSTMATE TEST - IGNORE'   --body 'FIRSTMATE TEST - IGNORE (wedge-alarm channel verification, Linux)'   --sound request
+# {"id":"cli:notification:show","result":{"reason":"disabled","shown":false,"type":"notification_show"}}
+# exit 0
+```
+
+Two facts this pins:
+
+- `notify-send` is installed here and cannot deliver, so presence alone must never count as a reachable channel.
+- `herdr notification show` exits 0 while reporting `shown:false`, so exit status must never count as delivery.
+
+Resulting classification on that host: `osascript` unavailable (not macOS), `notify-send` unavailable (no service owner), `herdr` unproven from a probe and unavailable once a real check notification is refused.
+That host therefore has no reachable alert channel, and a first away-mode entry refuses rather than starting a supervisor that could only leave a durable record.
+A re-entry over an already-armed away mode reports the same verdict and re-arms the supervisor anyway, so no restart can leave the flag set with no daemon.
+The check notification that resolves an `unproven` channel is titled as a channel check on every carrier, never as a wedge alarm.
+
+### Away-mode entry pre-flight, per harness
+
+The composer half of the pre-flight reads a surface each harness vendor controls, so it is measured against real harnesses.
+`FM_AFK_PREFLIGHT_LIVE_E2E=1 tests/fm-afk-preflight-live-e2e.test.sh` launches each installed harness bare, with no prompt, and requires an idle composer to read `empty` and a composer holding text to read `pending`.
+
+Measured 2026-08-10 on Linux aarch64:
+
+| harness | version | settled idle composer row | idle | text waiting |
+| --- | --- | --- | --- | --- |
+| claude | 2.1.226 (Claude Code) | `❯` U+00A0 (bytes `e2 9d af c2 a0`) | `empty` | `pending` |
+
+An idle claude 2.1.226 pads its own prompt glyph with U+00A0 NO-BREAK SPACE, which bash's `[:space:]` does not match in a UTF-8 locale.
+Before the space-separator trim in `bin/fm-composer-lib.sh`, that composer - holding nothing at all - classified as `pending`, so the away-mode daemon deferred every escalation into an idle claude pane (4714 deferrals on 2026-08-09, 345 more on 2026-08-10) and away-mode entry would refuse a delivery path that was in fact healthy.
+The trim removes only Unicode space-separator (Zs) characters from the two ends of the content; `tests/fm-composer-lib.test.sh` pins both directions, including that U+200B and the U+2063 operational marker are never trimmed.
+
+`codex` 0.147.0 and `opencode` 1.18.16 are installed on that machine but never settled on a composer during the run - both sit behind a first-run prompt on a throwaway working directory - so their verdicts are unmeasured there rather than passing.
+`pi`, `pi-signed`, `grok`, `kimi`, and `muse` are not installed.
+The guard reports every harness it skipped or could not measure, and refuses to pass when it measured nothing.

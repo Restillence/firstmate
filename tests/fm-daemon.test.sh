@@ -1251,18 +1251,42 @@ make_wedge_case() {  # <name> -> echoes dir; creates state/, fakebin/{uname,osas
 #!/usr/bin/env bash
 printf '%s\n' "${FM_FAKE_UNAME:-Darwin}"
 SH
-  # Fakes keep command discovery deterministic on any CI host.
+  # Fakes keep command discovery deterministic on any CI host, and let a case
+  # drive each channel's CARRIER - the thing that actually delivers - apart from
+  # its binary: a notification service that has no owner, a herdr that accepts a
+  # notification and suppresses it. FM_FAKE_* absent means "carrier healthy".
   cat > "$fakebin/osascript" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' osascript >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
 exit 0
 SH
+  cat > "$fakebin/notify-send" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' notify-send >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
+exit "${FM_FAKE_NOTIFY_SEND_RC:-0}"
+SH
+  # The D-Bus name-ownership answer for org.freedesktop.Notifications. busctl and
+  # dbus-send are shadowed too so a host that has them cannot answer instead.
+  cat > "$fakebin/gdbus" <<'SH'
+#!/usr/bin/env bash
+printf '(%s,)\n' "${FM_FAKE_NOTIFICATIONS_OWNED:-true}"
+SH
+  cp "$fakebin/gdbus" "$fakebin/busctl"
+  cp "$fakebin/gdbus" "$fakebin/dbus-send"
   cat > "$fakebin/herdr" <<'SH'
 #!/usr/bin/env bash
 printf '%s\n' herdr >> "${FM_WEDGE_ALARM_REAL_LOG:-/dev/null}"
+case "${1:-}" in
+  status)
+    printf '{"server":{"running":%s}}\n' "${FM_FAKE_HERDR_RUNNING:-true}" ;;
+  notification)
+    printf '{"result":{"shown":%s,"reason":"%s"}}\n' \
+      "${FM_FAKE_HERDR_SHOWN:-true}" "${FM_FAKE_HERDR_REASON:-shown}" ;;
+esac
 exit 0
 SH
-  chmod +x "$fakebin/uname" "$fakebin/osascript" "$fakebin/herdr"
+  chmod +x "$fakebin/uname" "$fakebin/osascript" "$fakebin/notify-send" \
+    "$fakebin/gdbus" "$fakebin/busctl" "$fakebin/dbus-send" "$fakebin/herdr"
   : > "$dir/alert.log"
   printf '%s\n' "$dir"
 }
@@ -1375,7 +1399,22 @@ test_wedge_alarm_command_failure_hides_configured_command() {
     || fail "command channel failure did not log its exit status: $(cat "$daemon_log" 2>/dev/null)"
   grep -F "$secret" "$daemon_log" >/dev/null \
     && fail "command channel failure leaked its configured command: $(cat "$daemon_log")"
-  pass "command channel failures redact configured commands while logging their exit status"
+  # The unreachable outcome ends up in the durable wedge marker, so it is a
+  # second place the configured command must never surface.
+  case "${WEDGE_ALARM_LAST_OUTCOME:-}" in
+    *"$secret"*) fail "the alarm outcome leaked the configured command: ${WEDGE_ALARM_LAST_OUTCOME}" ;;
+    ALERT\ UNREACHABLE:*) ;;
+    *) fail "a failed command channel did not report the alarm unreachable (${WEDGE_ALARM_LAST_OUTCOME:-unset})" ;;
+  esac
+  # Same again when the notifier SEAM is what failed, which is the path that has
+  # no per-notifier reason of its own to fall back to.
+  LOG="$daemon_log" FM_WEDGE_ALARM_LOG="$dir/alert.log" FM_WEDGE_ALARM_FAIL=command \
+    FM_WEDGE_ALARM_CHANNEL="command:true # $secret" \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  case "${WEDGE_ALARM_LAST_OUTCOME:-}" in
+    *"$secret"*) fail "the seam-failure outcome leaked the configured command: ${WEDGE_ALARM_LAST_OUTCOME}" ;;
+  esac
+  pass "command channel failures redact configured commands in both the log and the durable alarm outcome"
 }
 
 test_wedge_alarm_unknown_channel_hides_configured_directive() {
@@ -1414,13 +1453,231 @@ test_wedge_alarm_auto_darwin_selects_osascript() {
   pass "auto resolves to the macOS osascript notifier on Darwin (default-on)"
 }
 
-test_wedge_alarm_auto_non_darwin_has_no_os_channel() {
+# The 2026-08-09 incident's first defect: `auto` reached nothing outside macOS,
+# so a Linux home's last-resort alarm was a file on disk. auto must now resolve
+# this platform's own reachable channel.
+test_wedge_alarm_auto_non_darwin_selects_notify_send() {
   local dir log
   dir=$(make_wedge_case wedge-auto-linux); log="$dir/alert.log"
   PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux FM_WEDGE_ALARM_CHANNEL=auto \
     wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
-  [ ! -s "$log" ] || fail "auto selected a built-in OS channel on a non-macOS platform: $(cat "$log")"
-  pass "auto on a non-macOS platform selects no built-in OS channel (the marker or a configured command carries it)"
+  grep -F 'notify-send' "$log" >/dev/null \
+    || fail "auto did not resolve to the desktop notification channel on Linux: $(cat "$log")"
+  grep -F 'WEDGED 900s' "$log" >/dev/null || fail "the notify-send channel did not carry the summary"
+  pass "auto resolves to the notify-send desktop notification channel on a non-macOS platform"
+}
+
+# Presence is not deliverability: notify-send installed with NO notification
+# service owner is the exact shape of the incident host, and auto must fall
+# through to the next channel rather than counting it.
+test_wedge_alarm_auto_skips_notify_send_without_a_notification_service() {
+  local dir log
+  dir=$(make_wedge_case wedge-auto-no-service); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux \
+    FM_FAKE_NOTIFICATIONS_OWNED=false FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  grep -F 'notify-send' "$log" >/dev/null \
+    && fail "auto selected notify-send with no notification service owner: $(cat "$log")"
+  grep -F 'herdr' "$log" >/dev/null \
+    || fail "auto did not fall through to the herdr channel: $(cat "$log")"
+  pass "auto skips an installed notify-send whose notification service has no owner and falls through"
+}
+
+# Drive the two auto candidates apart and assert the verdict survives losing
+# either one, so neither is silently load-bearing for the other.
+test_wedge_alarm_auto_survives_losing_either_candidate() {
+  local dir log
+  dir=$(make_wedge_case wedge-auto-divergence); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux \
+    FM_FAKE_HERDR_RUNNING=false FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  grep -F 'notify-send' "$log" >/dev/null || fail "auto lost notify-send when herdr was down: $(cat "$log")"
+  grep -F 'herdr' "$log" >/dev/null && fail "auto selected herdr while no herdr server was running: $(cat "$log")"
+  : > "$log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Linux \
+    FM_FAKE_NOTIFICATIONS_OWNED=false FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  grep -F 'herdr' "$log" >/dev/null || fail "auto lost herdr when the notification service was down: $(cat "$log")"
+  pass "auto keeps delivering when either candidate carrier goes away, and drops the one that did"
+}
+
+test_wedge_alarm_auto_darwin_keeps_osascript_and_adds_herdr() {
+  local dir log
+  dir=$(make_wedge_case wedge-auto-darwin-herdr); log="$dir/alert.log"
+  PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_LOG="$log" FM_FAKE_UNAME=Darwin FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  grep -F 'osascript' "$log" >/dev/null || fail "auto dropped osascript on Darwin: $(cat "$log")"
+  grep -F 'notify-send' "$log" >/dev/null && fail "auto selected the Linux channel on Darwin: $(cat "$log")"
+  pass "auto on Darwin keeps the macOS notification channel and never selects the Linux one"
+}
+
+# herdr exits 0 while reporting {"shown":false}: believing the exit status would
+# report a silent channel as a working one.
+test_wedge_alarm_herdr_suppressed_notification_is_a_failure() {
+  local dir daemon_log rc
+  dir=$(make_wedge_case wedge-herdr-suppressed); daemon_log="$dir/daemon.log"
+  LOG="$daemon_log" PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_EXEC='' \
+    FM_FAKE_HERDR_SHOWN=false FM_FAKE_HERDR_REASON=disabled \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s"
+  rc=$?
+  [ "$rc" -ne 0 ] || fail "a herdr notification reported as not shown was treated as delivered"
+  grep -F 'did not show it (disabled)' "$daemon_log" >/dev/null \
+    || fail "a suppressed herdr notification was not reported with its reason: $(cat "$daemon_log" 2>/dev/null)"
+  LOG="$daemon_log" PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_EXEC='' \
+    wedge_alarm_via_herdr "away-mode WEDGED 900s" \
+    || fail "a herdr notification reported as shown was treated as a failure"
+  pass "the herdr channel believes herdr's own shown field, not its exit status"
+}
+
+# The away-mode entry self-test delivers on every entry, every idempotent
+# refresh, and every preflight report. If it wore the alarm's own title the
+# captain would learn to dismiss the one notification this alarm exists to make
+# credible, so the two must be distinguishable on every carrier that can post
+# one.
+test_wedge_alarm_selftest_is_titled_apart_from_the_real_alarm() {
+  local dir argv channel
+  dir=$(make_wedge_case wedge-selftest-title); argv="$dir/argv.log"
+  cat > "$dir/fakebin/notify-send" <<'SH'
+#!/usr/bin/env bash
+printf '%s\n' "$*" >> "${FM_WEDGE_ALARM_ARGV_LOG:?}"
+exit 0
+SH
+  cat > "$dir/fakebin/herdr" <<'SH'
+#!/usr/bin/env bash
+case "${1:-}" in
+  status) printf '{"server":{"running":true}}\n' ;;
+  notification)
+    printf '%s\n' "$*" >> "${FM_WEDGE_ALARM_ARGV_LOG:?}"
+    printf '{"result":{"shown":true,"reason":"shown"}}\n' ;;
+esac
+exit 0
+SH
+  chmod +x "$dir/fakebin/notify-send" "$dir/fakebin/herdr"
+  for channel in notify-send herdr; do
+    : > "$argv"
+    PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_ARGV_LOG="$argv" \
+      wedge_alarm_selftest "$channel" \
+      || fail "the $channel entry self-test did not deliver"
+    grep -F 'away-mode escalations WEDGED' "$argv" >/dev/null \
+      && fail "the $channel entry self-test posted the real wedge alarm's title: $(cat "$argv")"
+    grep -F 'alert channel check' "$argv" >/dev/null \
+      || fail "the $channel entry self-test was not titled as a channel check: $(cat "$argv")"
+    grep -F 'No escalation is wedged' "$argv" >/dev/null \
+      || fail "the $channel entry self-test body did not say that nothing is wrong: $(cat "$argv")"
+    : > "$argv"
+    PATH="$dir/fakebin:$PATH" FM_WEDGE_ALARM_EXEC='' FM_WEDGE_ALARM_ARGV_LOG="$argv" \
+      wedge_alarm_fire_channel "$channel" "away-mode WEDGED 900s" \
+      || fail "the real $channel alarm did not deliver"
+    grep -F 'away-mode escalations WEDGED' "$argv" >/dev/null \
+      || fail "the real $channel alarm lost its own title: $(cat "$argv")"
+  done
+  pass "the entry self-test is titled and worded apart from the real wedge alarm on every carrier"
+}
+
+# The carrier probes sit on the daemon's own alarm path (wedge_alarm_notify ->
+# auto -> channel status), so a carrier that stops answering must not block the
+# single-threaded housekeeping loop during the alarm it exists to raise. A probe
+# the watchdog stops is not-proven-deliverable, never available.
+test_wedge_alarm_carrier_probes_are_watchdog_bounded() {
+  local dir daemon_log started elapsed status tool
+  dir=$(make_wedge_case wedge-probe-timeout); daemon_log="$dir/daemon.log"
+  for tool in herdr gdbus busctl dbus-send; do
+    cat > "$dir/fakebin/$tool" <<'SH'
+#!/usr/bin/env bash
+sleep 60
+SH
+    chmod +x "$dir/fakebin/$tool"
+  done
+  started=$SECONDS
+  status=$(LOG="$daemon_log" PATH="$dir/fakebin:$PATH" FM_FAKE_UNAME=Linux \
+    FM_WEDGE_ALARM_TIMEOUT_SECS=1 wedge_alarm_channel_status herdr)
+  elapsed=$((SECONDS - started))
+  [ "$elapsed" -lt 30 ] || fail "the herdr status probe ran unbounded for ${elapsed}s"
+  case "$status" in
+    unproven*) ;;
+    *) fail "a herdr probe stopped by the watchdog was not reported as unproven: $status" ;;
+  esac
+  grep -F 'herdr probe timed out' "$daemon_log" >/dev/null \
+    || fail "the herdr probe timeout was not reported: $(cat "$daemon_log" 2>/dev/null)"
+  started=$SECONDS
+  status=$(LOG="$daemon_log" PATH="$dir/fakebin:$PATH" FM_FAKE_UNAME=Linux \
+    FM_WEDGE_ALARM_TIMEOUT_SECS=1 wedge_alarm_channel_status notify-send)
+  elapsed=$((SECONDS - started))
+  [ "$elapsed" -lt 30 ] || fail "the notification service probe ran unbounded for ${elapsed}s"
+  case "$status" in
+    unproven*) ;;
+    *) fail "a notification service probe stopped by the watchdog was not reported as unproven: $status" ;;
+  esac
+  grep -F 'gdbus probe timed out' "$daemon_log" >/dev/null \
+    || fail "the notification service probe timeout was not reported: $(cat "$daemon_log" 2>/dev/null)"
+  pass "the carrier probes are watchdog bounded and a stopped probe never counts as available"
+}
+
+# The second half of the incident: a wedge with no channel must be DETECTED and
+# recorded, not left indistinguishable from a wedge that alerted.
+test_wedge_alarm_unreachable_is_detected_and_stated() {
+  local dir daemon_log
+  dir=$(make_wedge_case wedge-unreachable); daemon_log="$dir/daemon.log"
+  LOG="$daemon_log" PATH="$dir/fakebin:$PATH" FM_FAKE_UNAME=Linux \
+    FM_FAKE_NOTIFICATIONS_OWNED=false FM_FAKE_HERDR_RUNNING=false \
+    FM_WEDGE_ALARM_CHANNEL=auto \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  case "${WEDGE_ALARM_LAST_OUTCOME:-}" in
+    ALERT\ UNREACHABLE:*) ;;
+    *) fail "an alarm with no resolvable channel did not report itself unreachable (${WEDGE_ALARM_LAST_OUTCOME:-unset})" ;;
+  esac
+  grep -F 'ERROR: ALERT UNREACHABLE' "$daemon_log" >/dev/null \
+    || fail "an unreachable alarm was not logged as an error: $(cat "$daemon_log" 2>/dev/null)"
+  pass "an alarm that no channel can carry reports itself UNREACHABLE instead of looking like a delivered one"
+}
+
+test_wedge_alarm_delivered_outcome_names_the_channel() {
+  local dir log
+  dir=$(make_wedge_case wedge-delivered-outcome); log="$dir/alert.log"
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=osascript \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  case "${WEDGE_ALARM_LAST_OUTCOME:-}" in
+    *"delivered via osascript"*) ;;
+    *) fail "a delivered alarm did not name its channel (${WEDGE_ALARM_LAST_OUTCOME:-unset})" ;;
+  esac
+  FM_WEDGE_ALARM_LOG="$log" FM_WEDGE_ALARM_CHANNEL=off \
+    wedge_alarm_notify "away-mode WEDGED 900s" "/s/.marker"
+  case "${WEDGE_ALARM_LAST_OUTCOME:-}" in
+    *"turned off"*) ;;
+    *) fail "a configured-off alarm did not report the captain's own choice (${WEDGE_ALARM_LAST_OUTCOME:-unset})" ;;
+  esac
+  pass "the alarm outcome distinguishes delivered, turned off, and unreachable"
+}
+
+# bin/fm-afk-return.sh surfaces the marker's FIRST line on the catch-up, so the
+# unreachable verdict has to live there rather than under the buffered items.
+test_inject_wedge_alarm_marker_carries_the_alarm_outcome() {
+  local dir state daemon_log first
+  dir=$(make_wedge_case wedge-marker-outcome); state="$dir/state"; daemon_log="$dir/daemon.log"
+  escalate_add "$state" "done: PR https://example.test/pr/1 checks green"
+  WEDGE_ALARM_LAST_EPOCH=0
+  LOG="$daemon_log" PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_FAKE_UNAME=Linux FM_FAKE_NOTIFICATIONS_OWNED=false FM_FAKE_HERDR_RUNNING=false \
+    FM_WEDGE_ALARM_CHANNEL=auto FM_SUPERVISOR_BACKEND=herdr \
+    inject_wedge_alarm "$state" 67477
+  first=$(head -1 "$state/.subsuper-inject-wedged" 2>/dev/null || true)
+  case "$first" in
+    *"WEDGED: 67477s"*"ALERT UNREACHABLE"*) ;;
+    *) fail "the durable marker's first line did not carry the unreachable alarm outcome: $first" ;;
+  esac
+  grep -F 'done: PR https://example.test/pr/1' "$state/.subsuper-inject-wedged" >/dev/null \
+    || fail "the durable marker lost its buffered escalations"
+  WEDGE_ALARM_LAST_EPOCH=0
+  rm -f "$state/.subsuper-inject-wedged"
+  LOG="$daemon_log" PATH="$dir/fakebin:$PATH" FM_STATE_OVERRIDE="$state" \
+    FM_WEDGE_ALARM_CHANNEL=osascript FM_WEDGE_ALARM_LOG="$dir/alert.log" FM_SUPERVISOR_BACKEND=herdr \
+    inject_wedge_alarm "$state" 900
+  first=$(head -1 "$state/.subsuper-inject-wedged" 2>/dev/null || true)
+  case "$first" in
+    *"delivered via osascript"*) ;;
+    *) fail "the durable marker's first line did not carry a delivered alarm outcome: $first" ;;
+  esac
+  pass "the durable wedge marker states on its first line whether the alarm reached anyone"
 }
 
 test_wedge_alarm_config_file_multi_channel() {
@@ -1902,7 +2159,16 @@ test_wedge_alarm_command_failure_hides_configured_command
 test_wedge_alarm_unknown_channel_hides_configured_directive
 test_wedge_alarm_off_disables_active_alert_regardless_of_position
 test_wedge_alarm_auto_darwin_selects_osascript
-test_wedge_alarm_auto_non_darwin_has_no_os_channel
+test_wedge_alarm_auto_non_darwin_selects_notify_send
+test_wedge_alarm_auto_skips_notify_send_without_a_notification_service
+test_wedge_alarm_auto_survives_losing_either_candidate
+test_wedge_alarm_auto_darwin_keeps_osascript_and_adds_herdr
+test_wedge_alarm_herdr_suppressed_notification_is_a_failure
+test_wedge_alarm_selftest_is_titled_apart_from_the_real_alarm
+test_wedge_alarm_carrier_probes_are_watchdog_bounded
+test_wedge_alarm_unreachable_is_detected_and_stated
+test_wedge_alarm_delivered_outcome_names_the_channel
+test_inject_wedge_alarm_marker_carries_the_alarm_outcome
 test_wedge_alarm_config_file_multi_channel
 test_wedge_alarm_failing_channel_degrades_gracefully
 test_wedge_alarm_hung_channel_times_out_and_falls_through

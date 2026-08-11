@@ -29,6 +29,16 @@ for tool in herdr jq pi python3; do
   command -v "$tool" >/dev/null 2>&1 || { echo "skip: $tool not found"; exit 0; }
 done
 
+# The launcher runs the entry pre-flight, and fm-afk-launch.sh is exempt from
+# the library-mode discard guard, so pin its alert channel here: this suite
+# proves away-mode delivery, not whether the host it runs on happens to own a
+# desktop notification service, and it must never post a real notification. The
+# daemon under test pins its own channel and recorder seam (see daemon-entry
+# below), so its alarm stays observable however this shell's environment reaches
+# the herdr server.
+export FM_WEDGE_ALARM_EXEC=discard
+export FM_WEDGE_ALARM_CHANNEL=off
+
 LAB_HELPER=${HERDR_LAB_HELPER:-$ROOT/bin/fm-herdr-lab.sh}
 SESSION=$("$LAB_HELPER" name fm-afk-pi-return-e2e)
 TMP_ROOT=$(fm_test_tmproot fm-afk-pi-return-e2e)
@@ -124,6 +134,7 @@ export FM_CHECK_INTERVAL=999999
 export FM_MAX_DEFER_SECS=3
 export FM_STALE_ESCALATE_SECS=999999
 export FM_WEDGE_ALARM_EXEC='$TMP_ROOT/wedge-recorder'
+export FM_WEDGE_ALARM_CHANNEL=herdr
 exec '$ROOT/bin/fm-afk-start.sh'
 EOF
 chmod +x "$TMP_ROOT/daemon-entry"

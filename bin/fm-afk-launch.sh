@@ -19,16 +19,43 @@
 # captain pane FIRST (from the pane this script runs in) and passes it in as
 # FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND explicitly.
 #
+# ENTRY PRE-FLIGHT (task fm-afk-wedge-unreachable). Away mode is only as good as
+# its delivery path, and on 2026-08-09 that path was already blocked when away
+# mode started: the captain had left an unsubmitted line in the supervisor
+# composer, so the composer guard correctly refused to type over it - 4714 times
+# across 19 hours - while the wedge alarm had no channel it could reach on this
+# platform. Nothing checked either condition, and firstmate reported away mode
+# active in good faith while it was already incapable of delivering anything.
+# So `start` and `start-native` now PROVE the delivery path before writing any
+# state: the supervisor composer must read affirmatively empty, and an active
+# alert must be able to reach the captain (or be explicitly turned off, which is
+# the captain's own consent to the durable marker alone). A failing pre-flight
+# refuses and names the concrete condition and its fix; --force is the escape
+# for a captain who has seen the report and wants away mode anyway.
+#
+# A RE-ENTRY reports instead of refusing. Once away mode is already armed - a
+# live daemon, or a state/.afk left by one that has since died - refusing would
+# leave the flag set with no supervisor and nothing left to raise the wedge
+# alarm, which is the incident's own shape rather than a fix for it. So a
+# re-entry states the failing condition just as loudly and still re-arms the
+# supervisor. Only a FIRST entry, made while the captain is still here to fix
+# it, refuses.
+#
 # Usage:
-#   fm-afk-launch.sh start     Capture the captain pane, then (unless the daemon
-#                              is already running) launch the daemon in a fresh
-#                              non-visible terminal for the detected backend and
-#                              record it. Idempotent: an already-running daemon
-#                              just refreshes state/.afk; a recorded-but-dead
-#                              terminal is reconciled (closed by id) first.
-#   fm-afk-launch.sh start-native
-#                              Prepare lifecycle state for a harness-native
-#                              background job and record that no terminal exists.
+#   fm-afk-launch.sh start [--force]
+#                              Capture the captain pane, run the entry
+#                              pre-flight, then (unless the daemon is already
+#                              running) launch the daemon in a fresh non-visible
+#                              terminal for the detected backend and record it.
+#                              Idempotent: an already-running daemon just
+#                              refreshes state/.afk; a recorded-but-dead terminal
+#                              is reconciled (closed by id) first.
+#   fm-afk-launch.sh start-native [--force]
+#                              Run the same pre-flight, then prepare lifecycle
+#                              state for a harness-native background job and
+#                              record that no terminal exists.
+#   fm-afk-launch.sh preflight Report the entry pre-flight verdict and change
+#                              nothing. Exits 0 when away mode can deliver.
 #   fm-afk-launch.sh stop      Correct-ordered exit: SIGTERM the daemon so its
 #                              cleanup flushes WHILE state/.afk is still present,
 #                              wait for it, close the recorded terminal by exact
@@ -79,6 +106,10 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 . "$FM_AFK_LAUNCH_DIR/fm-backend.sh"
 # shellcheck source=bin/fm-supervisor-target-lib.sh
 . "$FM_AFK_LAUNCH_DIR/fm-supervisor-target-lib.sh"
+# The same wedge-alarm channel owner the daemon uses, so entry and alarm agree
+# on which channels exist and whether any of them can reach the captain.
+# shellcheck source=bin/fm-wedge-alarm-lib.sh
+. "$FM_AFK_LAUNCH_DIR/fm-wedge-alarm-lib.sh"
 # fm-afk-start.sh provides the daemon-lock liveness helpers and
 # fm_afk_clear_stale_artifacts; it is sourceable (BASH_SOURCE guard) and its
 # main does not run on source. It sets `set -eu`, so turn errexit back off for
@@ -88,6 +119,9 @@ FM_AFK_LAUNCH_WS_LABEL="firstmate-afk-daemon"
 set +e
 
 fm_afk_launch_log() { printf 'fm-afk-launch: %s\n' "$*" >&2; }
+
+# Route the shared alarm library's diagnostics through this script's reporter.
+fm_wedge_alarm_log() { fm_afk_launch_log "$*"; }
 
 fm_afk_launch_lock_owned() {
   local pid expected actual
@@ -146,7 +180,89 @@ fm_afk_launch_lock_release() {
 }
 
 fm_afk_launch_usage() {
-  sed -n '2,34p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+  sed -n '2,64p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'
+}
+
+# --- entry pre-flight -------------------------------------------------------
+# Two independent conditions, both of which silently defeated away mode on
+# 2026-08-09. Each is reported on its own so a captain fixes what is actually
+# broken, and neither is inferred from the other.
+
+# Can an escalation be typed into the supervisor pane at all? The composer guard
+# in bin/fm-supervise-daemon.sh injects only on an affirmatively `empty`
+# composer, so anything else here is a delivery path that is already blocked.
+# This asks bin/fm-backend.sh for exactly the verdict that guard will use, and
+# never relaxes it: overwriting a captain's half-typed line - the incident line
+# was the beginning of an API key - is far worse than refusing to start.
+fm_afk_launch_preflight_composer() {  # <backend> <target>
+  local backend=$1 target=$2 state
+  state=$(fm_backend_composer_state "$backend" "$target" 2>/dev/null) || state=unknown
+  case "$state" in
+    empty)
+      return 0 ;;
+    pending|pending-unproven)
+      fm_afk_launch_log "pre-flight: the supervisor pane still holds unsubmitted text, so every away-mode escalation would be deferred rather than delivered; submit or clear that line, then re-enter away mode"
+      return 1 ;;
+    *)
+      fm_afk_launch_log "pre-flight: the supervisor pane's composer could not be read as ready for input (state=$state), which is what a closed agent or an unreadable pane looks like; away-mode escalations cannot be delivered into it"
+      return 1 ;;
+  esac
+}
+
+# Can a wedge alarm reach the captain if delivery does break later? The shared
+# owner probes each channel and self-tests the ones nothing short of delivering
+# can decide, so this reports what a channel DID, not what it might do.
+fm_afk_launch_preflight_alarm() {
+  local report rc state channel detail
+  report=$(wedge_alarm_preflight)
+  rc=$?
+  while IFS=$'\t' read -r state channel detail; do
+    [ -n "$state" ] || continue
+    fm_afk_launch_log "pre-flight: alert channel $channel is $state ($detail)"
+  done <<< "$report"
+  case "$rc" in
+    0) return 0 ;;
+    2)
+      fm_afk_launch_log "pre-flight: active alerts are turned off in config/wedge-alarm, so a stalled away mode will only leave a durable record on disk"
+      return 0 ;;
+    *)
+      fm_afk_launch_log "pre-flight: no alert channel can reach you, so a stalled away mode would stay invisible until you came back; set config/wedge-alarm to a command: directive that reaches you, or to off to accept the durable record alone"
+      return 1 ;;
+  esac
+}
+
+# Is away mode ALREADY armed? Either a live daemon holds the lock, or state/.afk
+# is set from an earlier entry whose daemon has since died (a crash, a closed
+# terminal, a reboot), which is exactly when firstmate re-invokes /afk on
+# restart. Both cases are a re-entry, not a decision to walk away.
+fm_afk_launch_away_mode_already_armed() {
+  daemon_lock_held_by_live_daemon && return 0
+  [ -f "$FM_AFK_LAUNCH_STATE/.afk" ]
+}
+
+# mode=gate   FIRST entry into away mode: a failed check refuses, because the
+#             captain is still here and can fix it, and a supervisor that cannot
+#             deliver is worse than no away mode at all.
+# mode=report away mode is ALREADY armed: the same checks run and every failure
+#             is stated just as loudly, but entry proceeds. Refusing a re-entry
+#             would leave state/.afk set with no supervisor to relaunch it and
+#             no daemon left to raise the wedge alarm, which is the shape of the
+#             2026-08-09 incident rather than a fix for it.
+fm_afk_launch_preflight() {  # <backend> <target> [force] [mode]
+  local backend=$1 target=$2 force=${3:-0} mode=${4:-gate} failures=
+  fm_afk_launch_preflight_composer "$backend" "$target" || failures="supervisor composer"
+  fm_afk_launch_preflight_alarm || failures="${failures:+$failures and }alert channel"
+  [ -n "$failures" ] || return 0
+  if [ "$mode" = report ]; then
+    fm_afk_launch_log "away mode is already active and the $failures check above is FAILING; re-arming the supervisor anyway so the stall stays visible, but away mode cannot be trusted to deliver until the $failures condition above is fixed"
+    return 0
+  fi
+  if [ "$force" -eq 1 ]; then
+    fm_afk_launch_log "pre-flight OVERRIDDEN by --force despite the $failures check; away mode may be unable to deliver anything"
+    return 0
+  fi
+  fm_afk_launch_log "refusing to start away mode: the $failures check above must pass first, or re-run with --force to accept a supervisor that may never deliver"
+  return 1
 }
 
 # The command run inside the created terminal. Real launch runs the shared
@@ -460,8 +576,8 @@ fm_afk_launch_create_tmux() {  # <captain-target> <captain-backend>
   fm_afk_launch_log "daemon launched in detached tmux session '$session', supervising $captain_target"
 }
 
-fm_afk_launch_start() {
-  local captain_target captain_backend backup artifact had_afk=0 result
+fm_afk_launch_start() {  # [force]
+  local force=${1:-0} captain_target captain_backend backup artifact had_afk=0 result mode=gate
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
@@ -471,6 +587,13 @@ fm_afk_launch_start() {
     fm_afk_launch_log "could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
   captain_backend=$(discover_supervisor_backend) || {
     fm_afk_launch_log "could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
+
+  # Prove the delivery path before anything reports away mode active. A first
+  # entry refuses on a blocked path; a re-entry over an already-armed away mode
+  # reports it and still re-arms, so the captain is never left flagged away with
+  # no supervisor at all.
+  fm_afk_launch_away_mode_already_armed && mode=report
+  fm_afk_launch_preflight "$captain_backend" "$captain_target" "$force" "$mode" || return 1
 
   mkdir -p "$FM_AFK_LAUNCH_STATE"
 
@@ -529,12 +652,29 @@ fm_afk_launch_start() {
   return "$result"
 }
 
-fm_afk_launch_start_native() {
-  local backup artifact had_afk=0 result=0
+fm_afk_launch_start_native() {  # [force]
+  local force=${1:-0} captain_target captain_backend backup artifact had_afk=0 result=0 mode=gate
   mkdir -p "$FM_AFK_LAUNCH_STATE" || return 1
   if [ -e "$FM_AFK_LAUNCH_STATE/.afk-return-catchup" ]; then
     fm_afk_launch_log "return catch-up is still pending; run bin/fm-afk-return.sh check before re-entering away mode"
     return 1
+  fi
+  # The native path leaves the daemon to auto-discover the captain pane from its
+  # inherited env, so the pre-flight resolves the same pane the same way and
+  # checks the same delivery path a terminal-backed entry checks.
+  captain_target=$(discover_supervisor_target) || captain_target=
+  captain_backend=$(discover_supervisor_backend) || captain_backend=
+  fm_afk_launch_away_mode_already_armed && mode=report
+  if [ -z "$captain_target" ] || [ -z "$captain_backend" ]; then
+    fm_afk_launch_log "pre-flight: the captain supervisor pane could not be resolved, so away-mode escalations have no proven destination (set FM_SUPERVISOR_TARGET/FM_SUPERVISOR_BACKEND)"
+    if [ "$mode" = report ]; then
+      fm_afk_launch_log "away mode is already active, so the supervisor is re-armed anyway rather than left running with no daemon"
+    else
+      [ "$force" -eq 1 ] || return 1
+      fm_afk_launch_log "pre-flight OVERRIDDEN by --force despite an unresolved supervisor pane"
+    fi
+  else
+    fm_afk_launch_preflight "$captain_backend" "$captain_target" "$force" "$mode" || return 1
   fi
   if daemon_lock_held_by_live_daemon; then
     fm_afk_launch_record_validate_if_present || return 1
@@ -626,8 +766,28 @@ fm_afk_launch_stop() {
   return "$result"
 }
 
+# Report the entry pre-flight verdict without touching any state, so a captain
+# can ask "could away mode deliver right now?" and get the same answer `start`
+# would act on.
+fm_afk_launch_preflight_report() {
+  local captain_target captain_backend
+  captain_target=$(discover_supervisor_target) || {
+    fm_afk_launch_log "pre-flight: could not resolve the captain supervisor pane (set FM_SUPERVISOR_TARGET)"; return 1; }
+  captain_backend=$(discover_supervisor_backend) || {
+    fm_afk_launch_log "pre-flight: could not resolve the captain supervisor backend (set FM_SUPERVISOR_BACKEND)"; return 1; }
+  fm_afk_launch_preflight "$captain_backend" "$captain_target" 0
+}
+
 fm_afk_launch_main() {
-  local result
+  local result command force=0 arg
+  command=${1:-start}
+  [ "$#" -eq 0 ] || shift
+  for arg in "$@"; do
+    case "$arg" in
+      --force) force=1 ;;
+      *) fm_afk_launch_usage >&2; return 2 ;;
+    esac
+  done
   # Traps first, lock second. Acquiring before the handlers exist leaves a
   # window where a signal terminates this process by default action and leaks
   # the lock directory, which then blocks the next away-mode launch until the
@@ -637,9 +797,10 @@ fm_afk_launch_main() {
   trap 'exit 130' INT
   trap 'exit 143' TERM
   fm_afk_launch_lock_acquire || return 1
-  case "${1:-start}" in
-    start) fm_afk_launch_start ;;
-    start-native) fm_afk_launch_start_native ;;
+  case "$command" in
+    start) fm_afk_launch_start "$force" ;;
+    start-native) fm_afk_launch_start_native "$force" ;;
+    preflight) fm_afk_launch_preflight_report ;;
     stop) fm_afk_launch_stop ;;
     reconcile) fm_afk_launch_reconcile ;;
     -h|--help|help) fm_afk_launch_usage ;;

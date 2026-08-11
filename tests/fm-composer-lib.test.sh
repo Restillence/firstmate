@@ -133,8 +133,110 @@ test_real_text_is_pending() {
   pass "fm_composer_classify_content: real unsubmitted text reads pending (including a popup argument-hint fill)"
 }
 
+# --- Non-ASCII composer padding (task fm-afk-wedge-unreachable) -------------
+# claude 2.1.226 draws its EMPTY composer as `❯` U+00A0, a space character bash's
+# [:space:] does not match in a UTF-8 locale, so a composer holding nothing
+# classified as pending: the away-mode daemon deferred 4714 escalations on
+# 2026-08-09 and 345 more the next day into a pane the captain could see was
+# clear. The trim that fixes it is a safety boundary in both directions, so these
+# cases pin what it removes AND what it must never remove.
+
+NBSP=$'\xc2\xa0'                 # U+00A0, claude's own composer padding
+THIN_SPACE=$'\xe2\x80\x89'       # U+2009, another Zs a harness could pad with
+IDEOGRAPHIC_SPACE=$'\xe3\x80\x80'  # U+3000
+ZERO_WIDTH_SPACE=$'\xe2\x80\x8b' # U+200B, format class, NOT a space separator
+OPERATIONAL_MARKER=$'\xe2\x81\xa3'  # U+2063, the away-mode injection prefix
+
+test_space_separator_padding_reads_empty() {
+  local out
+  out=$(classify 1 "❯$NBSP")
+  [ "$out" = empty ] \
+    || fail "claude 2.1.226's idle composer (glyph + U+00A0) must read empty, got '$out'"
+  out=$(classify 0 "❯$NBSP" '' '' "❯$NBSP")
+  [ "$out" = empty ] \
+    || fail "an unbordered glyph + U+00A0 row must read empty, got '$out'"
+  out=$(classify 1 "$NBSP")
+  [ "$out" = empty ] || fail "a composer holding only U+00A0 must read empty, got '$out'"
+  out=$(classify 1 "$NBSP$THIN_SPACE$IDEOGRAPHIC_SPACE")
+  [ "$out" = empty ] || fail "mixed space-separator padding must read empty, got '$out'"
+  out=$(classify 1 "❯$THIN_SPACE")
+  [ "$out" = empty ] || fail "glyph + U+2009 must read empty, got '$out'"
+  # The ghost-stripped-to-empty fallback reads the PLAIN row, so the padding has
+  # to be normalised there too; without it a padded glyph reads unknown and the
+  # daemon still refuses to deliver into an idle pane.
+  out=$(classify 0 "" '' '' "❯$NBSP")
+  [ "$out" = empty ] \
+    || fail "a ghost-only row whose plain glyph carries U+00A0 padding must read empty, got '$out'"
+  out=$(classify 0 "" '' '' "$NBSP❯$NBSP")
+  [ "$out" = empty ] \
+    || fail "padding on both sides of the plain glyph must read empty, got '$out'"
+  pass "fm_composer_classify_content: space-separator padding around an empty composer reads empty"
+}
+
+# The anti-greedy half. Every case here MUST stay pending: if the trim ever grows
+# to eat something a captain could type, the away-mode injector would type its
+# digest over a half-written line - which on 2026-08-09 was the start of an API
+# key. These fail loudly the moment the trim becomes greedier than Zs-at-the-ends.
+test_space_separator_trim_never_eats_real_input() {
+  local out padded
+  out=$(classify 1 "❯${NBSP}here is my runpod api key:")
+  [ "$out" = pending ] \
+    || fail "real text after U+00A0 padding must stay pending, got '$out'"
+  out=$(classify 1 "a${NBSP}b")
+  [ "$out" = pending ] || fail "an interior U+00A0 must not collapse real text, got '$out'"
+  out=$(classify 1 "${NBSP}drafted reply${NBSP}")
+  [ "$out" = pending ] || fail "padding around real text must leave the text pending, got '$out'"
+  # Not space separators: a format character carries no width but is not padding,
+  # and U+2063 specifically is the operational prefix, so an unsent injection
+  # sitting in the composer has to keep reading as pending.
+  out=$(classify 1 "$ZERO_WIDTH_SPACE")
+  [ "$out" = pending ] || fail "U+200B is not a space separator and must not be trimmed, got '$out'"
+  out=$(classify 1 "$OPERATIONAL_MARKER")
+  [ "$out" = pending ] \
+    || fail "the U+2063 operational marker must never be trimmed away, got '$out'"
+  out=$(classify 1 "$OPERATIONAL_MARKER FIRSTMATE_OP: away-supervisor digest")
+  [ "$out" = pending ] || fail "an unsent injected digest must stay pending, got '$out'"
+  # A single ordinary character is input, however small.
+  for padded in '.' '-' '_' 'x' '/'; do
+    out=$(classify 1 "$padded")
+    [ "$out" = pending ] || fail "a typed '$padded' must stay pending, got '$out'"
+  done
+  pass "fm_composer_classify_content: the space-separator trim never removes anything a captain could type"
+}
+
+# The trim runs at two sites - once on the content as handed in, and again after
+# a leading prompt glyph is stripped - and both have to know about the padding.
+# A caller's anchored idle-placeholder pattern is what separates them: the
+# remainder after the glyph still carries the harness's padding, so an anchored
+# pattern only matches if that site trims it too.
+test_space_separator_padding_is_trimmed_after_glyph_stripping() {
+  local out
+  out=$(classify 1 "❯${NBSP}Type a message..." '^Type a message')
+  [ "$out" = empty ] \
+    || fail "an anchored idle placeholder behind glyph + U+00A0 padding must read empty, got '$out'"
+  out=$(classify 1 "❯${NBSP}Type a message... and then this" '^Type a message\.\.\.$')
+  [ "$out" = pending ] \
+    || fail "real text after an idle placeholder must still read pending, got '$out'"
+  pass "fm_composer_classify_content: padding is trimmed after glyph stripping, so an anchored idle pattern still matches"
+}
+
+test_space_separator_trim_is_bounded_and_stable() {
+  local out
+  # fm_composer_trim_spaces loops until stable; prove it terminates on input that
+  # is nothing but padding and on input it cannot shorten.
+  out=$(fm_composer_trim_spaces "$NBSP$NBSP$THIN_SPACE  $NBSP")
+  [ -z "$out" ] || fail "all-padding content must trim to nothing, got '$out'"
+  out=$(fm_composer_trim_spaces "keep$NBSP me")
+  [ "$out" = "keep$NBSP me" ] || fail "interior padding must survive the trim, got '$out'"
+  pass "fm_composer_trim_spaces: terminates on all-padding input and leaves interiors alone"
+}
+
 test_bare_shell_glyphs_are_unknown
 test_stripped_unbordered_content_uses_plain_content
+test_space_separator_padding_reads_empty
+test_space_separator_trim_never_eats_real_input
+test_space_separator_padding_is_trimmed_after_glyph_stripping
+test_space_separator_trim_is_bounded_and_stable
 test_bare_shell_prompt_with_command_is_not_empty
 test_bordered_shell_glyph_is_empty
 test_agent_glyphs_are_empty_bordered_and_bare
