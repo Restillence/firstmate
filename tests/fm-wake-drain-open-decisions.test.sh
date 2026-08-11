@@ -124,6 +124,63 @@ test_inline_key_text_is_not_a_key() {
   pass "a [key=...] mention inside note prose is not treated as the decision's key"
 }
 
+# A CAPTAIN'S DECISION MUST NEVER BECOME INVISIBLE. A hand-typed key is what a
+# human reaches for when something has already gone wrong, so a space or any
+# other character outside the slug alphabet must degrade toward visibility: the
+# record folds onto "default" and is still listed, carrying a marker that names
+# the token it could not parse. Both token positions are covered, because a
+# malformed pre-colon token is the same defect as a malformed post-colon one.
+test_unparseable_key_still_lists_and_says_so() {
+  local dir state out t
+  dir=$(make_case unparseable-key)
+  state="$dir/state"
+  out="$dir/drain.out"
+  printf 'working: started\nneeds-decision: [key=composer nbsp] pick a normalization' \
+    > "$state/task25.status"
+  printf 'working: started\nneeds-decision [key=composer nbsp]: pick a normalization\n' \
+    > "$state/task26.status"
+  printf 'needs-decision: [key=] pick a normalization\n' > "$state/task27.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on an unparseable key token"
+
+  grep -F 'OPEN DECISIONS' "$out" >/dev/null \
+    || fail "an unparseable key made the whole section vanish: $(cat "$out")"
+  for t in task25 task26; do
+    # The marker leads the note so a per-item cut cannot truncate it away, and
+    # it quotes the offending token as written so the operator can correct it.
+    grep -F "$t needs-decision: [unparseable key 'composer nbsp'; filed under default] pick a normalization" "$out" >/dev/null \
+      || fail "$t: an unparseable key token dropped or unmarked the decision: $(cat "$out")"
+  done
+  grep -F "task27 needs-decision: [unparseable key ''; filed under default] pick a normalization" "$out" >/dev/null \
+    || fail "an empty key token dropped or unmarked the decision: $(cat "$out")"
+  pass "an unparseable key token still lists the decision, under default, marked as unparseable"
+}
+
+test_well_formed_key_carries_no_marker() {
+  local dir state out
+  dir=$(make_case no-spurious-marker)
+  state="$dir/state"
+  out="$dir/drain.out"
+  # The marker must not leak into the normal path: neither key position, nor a
+  # line with no token at all, may be reported as unparseable.
+  printf 'needs-decision [key=api-shape]: pick REST or RPC\n' > "$state/task28.status"
+  printf 'needs-decision: [key=api-shape] pick REST or RPC\n' > "$state/task29.status"
+  printf 'needs-decision: pick REST or RPC\n' > "$state/task30.status"
+
+  FM_STATE_OVERRIDE="$state" "$DRAIN" > "$out" || fail "drain failed on well-formed keys"
+
+  if grep -F 'unparseable key' "$out" >/dev/null; then
+    fail "a well-formed or absent key token was marked unparseable: $(cat "$out")"
+  fi
+  grep -F 'task28 [key=api-shape] needs-decision: pick REST or RPC' "$out" >/dev/null \
+    || fail "a pre-colon key stopped folding cleanly: $(cat "$out")"
+  grep -F 'task29 [key=api-shape] needs-decision: pick REST or RPC' "$out" >/dev/null \
+    || fail "a post-colon key stopped folding cleanly: $(cat "$out")"
+  grep -F 'task30 needs-decision: pick REST or RPC' "$out" >/dev/null \
+    || fail "an unkeyed line stopped folding byte for byte: $(cat "$out")"
+  pass "a well-formed or absent key token carries no unparseable marker"
+}
+
 test_reserved_key_namespace_is_owned_by_its_library() {
   local dir state out
   dir=$(make_case reserved-key)
@@ -291,6 +348,8 @@ test_explicit_resolution_closes_it
 test_key_token_after_the_colon_names_the_same_key
 test_key_positions_close_each_other
 test_inline_key_text_is_not_a_key
+test_unparseable_key_still_lists_and_says_so
+test_well_formed_key_carries_no_marker
 test_later_unrelated_terminal_line_does_not_close_it
 test_reserved_key_namespace_is_owned_by_its_library
 test_no_open_decisions_prints_nothing

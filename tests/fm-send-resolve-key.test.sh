@@ -337,6 +337,46 @@ test_refusal_still_refuses_and_names_what_it_saw() {
   pass "fm-send --resolve-key: closed and never-opened keys still refuse, naming what is open"
 }
 
+# The resolve direction of the unparseable-key fallback. A decision whose token
+# could not be parsed folds onto "default" and stays visible, so it is closable
+# exactly as an unkeyed decision is - and the slug the operator actually typed,
+# which is not a valid key at all, must still be refused. Closure never gets
+# more permissive just because the open direction got more forgiving.
+test_unparseable_key_folds_to_default_and_stays_closable() {
+  local dir fb log home rc out err
+  dir="$TMP_ROOT/unparseable-key"; mkdir -p "$dir"
+  fb=$(make_stubs "$dir"); log="$dir/send.log"; err="$dir/send.err"
+  home=$(setup_home unparseable-key)
+  fm_write_meta "$home/state/t13.meta" "window=sess:fm-t13" "kind=ship"
+  printf 'needs-decision: [key=composer nbsp] pick a normalization' \
+    > "$home/state/t13.status"
+
+  out=$(drain_out "$home")
+  printf '%s' "$out" | grep -F "t13 needs-decision: [unparseable key 'composer nbsp'" >/dev/null \
+    || fail "precondition: an unparseable key should still list as open: $out"
+
+  # The typed slug is not a valid key, so the argument parser refuses it before
+  # anything is sent - the fold's fallback did not make it acceptable.
+  run_send_err "$fb" "$home" "$log" "$err" t13 --resolve-key 'composer nbsp' "answer" >/dev/null; rc=$?
+  [ "$rc" -ne 0 ] || fail "an invalid key slug was accepted by --resolve-key"
+  [ ! -s "$log" ] || fail "a refused answer still typed text: $(cat "$log")"
+
+  # A key nothing opened is still refused, and the refusal names default - what
+  # the fold actually observed - so the operator can see where it landed.
+  run_send_err "$fb" "$home" "$log" "$err" t13 --resolve-key composer-nbsp "answer" >/dev/null; rc=$?
+  [ "$rc" -ne 0 ] || fail "a key that only the malformed token named was accepted"
+  assert_contains "$(cat "$err")" "default" "the refusal should name the key the record actually folded onto"
+
+  # And the record is closable where it actually is.
+  run_send "$fb" "$home" "$log" t13 --resolve-key default "normalize to NBSP"; rc=$?
+  [ "$rc" -eq 0 ] || fail "the decision was not closable under the key it folded onto"
+  out=$(drain_out "$home")
+  if printf '%s' "$out" | grep -F 'unparseable key' >/dev/null; then
+    fail "the answered decision still lists as open: $out"
+  fi
+  pass "fm-send --resolve-key: an unparseable key folds to default, stays closable, and refuses the bad slug"
+}
+
 test_failed_send_does_not_close() {
   local dir fb log home rc out
   dir="$TMP_ROOT/send-fail"; mkdir -p "$dir"
@@ -537,6 +577,7 @@ test_not_open_key_refuses_before_send
 test_post_colon_key_is_resolvable
 test_close_after_unterminated_line_keeps_both_readers_agreeing
 test_refusal_still_refuses_and_names_what_it_saw
+test_unparseable_key_folds_to_default_and_stays_closable
 test_failed_send_does_not_close
 test_multiple_keys_close_together
 test_local_secondmate_answer_marked_and_closed

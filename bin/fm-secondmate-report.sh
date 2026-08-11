@@ -68,21 +68,26 @@ if [ ! -d "$(dirname "$STATUS_FILE")" ]; then
 fi
 
 token=$(fm_pending_reply_corr_token "$CORR")
+# The verb here is caller-supplied and reaches needs-decision/blocked/resolved,
+# so this writes into the parent's own decision ledger and must go through
+# fm_status_append (bin/fm-classify-lib.sh, in scope via the library above):
+# a plain >> onto an unterminated last line welds two verbs into one record and
+# makes the whole-file and cursor-backed folds disagree about what is open.
 if [ "$DOC_MODE" = 1 ]; then
   [ $# -ge 1 ] || usage
   DOC_PATH=$1
   shift
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (%s via-helper)\n' "$VERB" "$token" "$NOTE" "$DOC_PATH" >> "$STATUS_FILE"
+    fm_status_append "$STATUS_FILE" "$VERB [$token]: $NOTE ($DOC_PATH via-helper)"
   else
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$DOC_PATH" >> "$STATUS_FILE"
+    fm_status_append "$STATUS_FILE" "$VERB [$token]: $DOC_PATH (via-helper)"
   fi
 else
   NOTE=$*
   if [ -n "$NOTE" ]; then
-    printf '%s [%s]: %s (via-helper)\n' "$VERB" "$token" "$NOTE" >> "$STATUS_FILE"
+    fm_status_append "$STATUS_FILE" "$VERB [$token]: $NOTE (via-helper)"
   else
-    printf '%s [%s]: (via-helper)\n' "$VERB" "$token" >> "$STATUS_FILE"
+    fm_status_append "$STATUS_FILE" "$VERB [$token]: (via-helper)"
   fi
 fi

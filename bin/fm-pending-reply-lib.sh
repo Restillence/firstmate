@@ -906,6 +906,10 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec escalated closed parent_status escalation key note
   local open_line open_key open_note now
+  # The comparison note must come out of the same reader that built the open-set
+  # lines it is compared against, or the two diverge the moment an escalation
+  # note begins with a key token and the close never matches.
+  local _FM_DECISION_VERB _FM_DECISION_KEY _FM_DECISION_NOTE
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
@@ -917,8 +921,9 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   [ -n "$parent_status" ] || return 1
   escalation=$(fm_pending_reply_escalation_line "$parent_status" "$rec" "$corr")
   if [ -n "$escalation" ]; then
-    key=$(_fm_decision_key "$escalation") || key=''
-    note=$(status_line_note "$escalation")
+    _fm_decision_parse "$escalation"
+    key=$_FM_DECISION_KEY
+    note=$_FM_DECISION_NOTE
     while IFS= read -r open_line; do
       [ -n "$open_line" ] || continue
       open_key=${open_line%%$'\t'*}
