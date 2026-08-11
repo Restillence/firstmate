@@ -5,7 +5,10 @@
 # parent status channel with the request's corr=<id> token. This helper makes
 # that easy, but correctness must not depend on using it: a plain echo of a
 # status line that includes the same corr token is equally valid
-# (bin/fm-pending-reply-lib.sh).
+# (bin/fm-pending-reply-lib.sh). One thing a hand-written append must then do
+# for itself, which this helper gets from fm_status_append: terminate the
+# previous line first, so the report cannot weld onto a last line left without a
+# trailing newline (bin/fm-classify-lib.sh owns why that corrupts the record).
 #
 # Usage:
 #   fm-secondmate-report.sh <status-file> <verb> <corr_id> <note...>

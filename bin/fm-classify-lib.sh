@@ -13,7 +13,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are two documented exceptions. The absorb classification
+# There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -23,7 +23,11 @@
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time.
+# log every time. fm_status_append is the third: it is this library's one WRITE
+# primitive, appending a single line to a status stream so it can never weld
+# onto an unterminated last line. It lives here because this file already owns
+# what a status line means, and every tracked writer into a status stream goes
+# through it rather than a plain `>>`; its own comment below owns the reason.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
