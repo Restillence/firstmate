@@ -1064,6 +1064,18 @@ EOF
   assert_contains "$out" "working: step 7" "FM_SESSION_START_STATUS_TAIL=2 tail missing the most recent line"
   assert_not_contains "$out" "working: step 5" "FM_SESSION_START_STATUS_TAIL=2 did not bound the tail to 2 lines"
 
+  # The weld-proof append every worker is briefed to use leads with a newline, so
+  # an already-terminated file gains a blank separator before each record. The
+  # bound counts status records, not bytes: a blank-separated log must show the
+  # same records as its compact equivalent, or the digest silently loses half the
+  # supervisor signal on the one surface every session reads.
+  printf 'working: step 1\n\nworking: step 2\n\nworking: step 3\n\nworking: step 4\n\nworking: step 5\n\nworking: step 6\n\nworking: step 7\n' \
+    > "$home/state/task-a.status"
+  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  assert_contains "$out" "working: step 7" "blank-separated status tail missing the most recent line"
+  assert_contains "$out" "working: step 3" "blank separators consumed tail slots a real status line should hold"
+  assert_not_contains "$out" "working: step 1" "blank-separated status tail leaked an older line past the bound"
+
   pass "status tail is bounded to the configured line count, with the full log path always printed"
 }
 

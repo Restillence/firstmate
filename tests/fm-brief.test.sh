@@ -724,6 +724,13 @@ test_status_append_instruction_cannot_weld() {
   # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
   assert_grep '`fm_status_append` in `bin/fm-classify-lib.sh` is the owner of that rule' "$charter" \
     "secondmate charter did not point at the owner of the newline-safe append rule"
+  # The charter's own escalation example writes into the PARENT firstmate's
+  # ledger - the same stream fm-send closes decisions in - so it must not
+  # contradict the helper note ten lines above it by showing a bare append.
+  assert_grep "$weld_proof" "$charter" \
+    "secondmate charter did not instruct a leading-newline escalation append"
+  assert_no_grep "$welding" "$charter" \
+    "secondmate charter still instructs a bare escalation append that can weld onto an unterminated line"
   pass "fm-brief.sh: scaffolded status appends cannot weld onto an unterminated line"
 }
 
