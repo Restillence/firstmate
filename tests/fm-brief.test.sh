@@ -671,6 +671,69 @@ test_pause_verb_override_renders_all_brief_scaffolds() {
   pass "fm-brief.sh: custom pause verb renders in every scaffold"
 }
 
+# Every tracked in-repo writer into a status stream goes through fm_status_append
+# (bin/fm-classify-lib.sh), which terminates the file before appending so a line
+# can never weld onto an unterminated last line. A worker following its brief is
+# the one appender outside that helper, so the scaffolds must hand out a form
+# with the same property: a printf whose format starts and ends with a newline.
+# The worker's own text stays a %s ARGUMENT rather than part of that format, so a
+# literal `%` in a note ("50% done") cannot be eaten as a conversion spec - the
+# weld-proof form must not trade one silent corruption for another.
+# The charter's helper note must also stop calling a bare echo an equally valid
+# substitute, since that sentence taught the weaker form as an equivalent.
+test_status_append_instruction_cannot_weld() {
+  local home id kind brief charter weld_proof welding
+  home="$TMP_ROOT/status-append-home"
+  mkdir -p "$home/data"
+  weld_proof="printf '\n%s\n' \"{state}: {one short line}\" >> "
+  welding='echo "{state}: {one short line}" >> '
+
+  for kind in ship scout; do
+    id="brief-append-$kind"
+    case "$kind" in
+      ship)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --mode no-mistakes >/dev/null 2>&1
+        ;;
+      scout)
+        FM_HOME="$home" "$ROOT/bin/fm-brief.sh" "$id" firstmate --scout >/dev/null 2>&1
+        ;;
+    esac
+    brief="$home/data/$id/brief.md"
+    assert_present "$brief" "$kind brief was not scaffolded"
+    assert_grep "$weld_proof" "$brief" \
+      "$kind brief did not instruct a leading-newline status append"
+    assert_no_grep "$welding" "$brief" \
+      "$kind brief still instructs a bare append that can weld onto an unterminated line"
+    assert_grep 'The leading newline keeps your line off the end of a last line another writer' "$brief" \
+      "$kind brief did not say why the leading newline is there"
+    # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+    assert_grep 'keeps a literal `%` in it from being eaten' "$brief" \
+      "$kind brief did not keep the worker note out of the printf format string"
+  done
+
+  FM_HOME="$home" FM_SECONDMATE_CHARTER='Handle routed domain work.' \
+    "$ROOT/bin/fm-brief.sh" brief-append-charter --secondmate --no-projects >/dev/null 2>&1
+  charter="$home/data/brief-append-charter/brief.md"
+  assert_present "$charter" "secondmate charter was not scaffolded"
+  assert_no_grep 'is equally valid' "$charter" \
+    "secondmate charter still calls a bare echo an equal substitute for the report helper"
+  assert_grep 'do not depend on the helper being present' "$charter" \
+    "secondmate charter lost the do-not-depend-on-the-helper guidance"
+  assert_grep 'your line must start a line of its own' "$charter" \
+    "secondmate charter did not state the obligation a hand-written append carries"
+  # shellcheck disable=SC2016 # Literal backticks must remain unexpanded.
+  assert_grep '`fm_status_append` in `bin/fm-classify-lib.sh` is the owner of that rule' "$charter" \
+    "secondmate charter did not point at the owner of the newline-safe append rule"
+  # The charter's own escalation example writes into the PARENT firstmate's
+  # ledger - the same stream fm-send closes decisions in - so it must not
+  # contradict the helper note ten lines above it by showing a bare append.
+  assert_grep "$weld_proof" "$charter" \
+    "secondmate charter did not instruct a leading-newline escalation append"
+  assert_no_grep "$welding" "$charter" \
+    "secondmate charter still instructs a bare escalation append that can weld onto an unterminated line"
+  pass "fm-brief.sh: scaffolded status appends cannot weld onto an unterminated line"
+}
+
 test_scout_and_secondmate_load_decision_hold_policy() {
   local home scout charter
   home="$TMP_ROOT/decision-policy-home"
@@ -728,5 +791,6 @@ test_secondmate_no_projects_charter
 test_secondmate_marked_request_reporting_contract
 test_secondmate_directory_paths_are_absolute_and_output_is_stable
 test_pause_verb_override_renders_all_brief_scaffolds
+test_status_append_instruction_cannot_weld
 test_scout_and_secondmate_load_decision_hold_policy
 test_scout_and_secondmate_scaffold

@@ -13,7 +13,7 @@
 # daemon keeps its escalation-digest seen-markers; the watcher keeps its .seen-*
 # signatures).
 #
-# There are two documented exceptions. The absorb classification
+# There are three documented exceptions. The absorb classification
 # (crew_absorb_class and its working/paused wrappers) is NOT a pure status-file
 # read: it reuses bin/fm-crew-state.sh, which may make a bounded no-mistakes call,
 # to decide whether a crew that just stopped its turn or went stale is working,
@@ -23,7 +23,11 @@
 # open-decisions fold" below) also writes: it persists a per-status-file byte
 # cursor and folded open-set as a side effect, so a per-drain fleet-wide scan
 # stays bounded by new appends instead of re-reading each task's whole lifetime
-# log every time.
+# log every time. fm_status_append is the third: it is this library's one WRITE
+# primitive, appending a single line to a status stream so it can never weld
+# onto an unterminated last line. It lives here because this file already owns
+# what a status line means, and every tracked writer into a status stream goes
+# through it rather than a plain `>>`; its own comment below owns the reason.
 
 # Directory of this library, used to locate the sibling fm-crew-state.sh reader.
 # Resolved at source time from BASH_SOURCE so it works whether sourced by a
@@ -160,19 +164,96 @@ status_is_paused_or_captain_held() {  # <status-line>
 # rule 6), so closure never depends on a busy worker's discipline.
 #
 # Decision key grammar (backward-compatible with the existing "<verb>: <note>"
-# format): an OPTIONAL "[key=<slug>]" token sits between the verb and the colon,
+# format): an OPTIONAL "[key=<slug>]" token sits on either side of the colon,
 #   needs-decision [key=api-shape]: <summary>
+#   needs-decision: [key=api-shape] <summary>
 #   resolved       [key=api-shape]: <how it was decided>
+# Both positions name the same key. Accepting both is a correctness requirement,
+# not a convenience: every writer in bin/ emits the pre-colon form, but a human
+# or worker hand-appending a line reads the token as part of the note and writes
+# it after the colon. Recognizing only the pre-colon position silently folded
+# every such line onto the key "default" while the note still displayed the
+# intended slug - so the drain listed a decision that LOOKED keyed, and
+# fm-send's --resolve-key then correctly refused a key nothing had ever opened.
+# The token is recognized after the colon only when it BEGINS the note, so an
+# incidental "[key=...]" later in prose is left alone.
 # A line with no token uses the key "default", preserving the historical
 # one-open-decision-per-task behavior (a bare "resolved:" closes "default").
-# The three parsers are pure reads of a single line; the verb parser strips any
-# key token before the colon so the leading word is recovered cleanly.
+#
+# A token whose slug is empty or holds any character outside [A-Za-z0-9._-] is
+# UNPARSEABLE, and is treated as no token at all: the record folds onto
+# "default" and stays visible. That direction is deliberate and load-bearing. A
+# hand-typed key is exactly what a human reaches for when something has already
+# gone wrong, so a space or a stray character in the slug must never be able to
+# delete a captain's decision from the OPEN DECISIONS listing - a decision shown
+# under the wrong key is a nuisance, a decision that silently vanishes is the
+# failure this whole fold exists to prevent. The fallback is not silent, though:
+# the note the fold records is prefixed with a marker naming the offending token
+# and stating the fallback, so the operator can see the key was not the one they
+# wrote and fix it, instead of accumulating records under "default" forever. The
+# marker leads the note so a per-item cut (bin/fm-line-cap-lib.sh) cannot
+# truncate it away.
+#
+# _fm_decision_parse is the ONE reader of this grammar: verb, key and note all
+# come out of a single fork-free pass, so no consumer can extract one of them by
+# a rule the others do not share. It runs once per line of every task's whole
+# lifetime log (scan_open_decisions, and fm-send's pre-flight), so it stays pure
+# parameter expansion - no command substitution, no subprocesses. It returns its
+# results in globals rather than on stdout for the same reason; callers that
+# want them contained declare the three names `local` first.
+_fm_decision_parse() {  # <status-line> -> sets _FM_DECISION_{VERB,KEY,NOTE}
+  local line=$1 prefix note token='' keyed=0
+  prefix=${line%%:*}
+  case "$line" in
+    *:*) note=${line#*:} ;;
+    *) note=$line ;;
+  esac
+  note=${note#"${note%%[![:space:]]*}"}
+  _FM_DECISION_VERB=${prefix%%\[key=*}
+  _FM_DECISION_VERB=${_FM_DECISION_VERB#"${_FM_DECISION_VERB%%[![:space:]]*}"}
+  _FM_DECISION_VERB=${_FM_DECISION_VERB%"${_FM_DECISION_VERB##*[![:space:]]}"}
+  # The post-colon token is recognized only when it BEGINS the note, so an
+  # incidental "[key=...]" later in prose stays ordinary text and cannot invent
+  # a key - nor be reported as a malformed one.
+  case "$note" in
+    \[key=*\]*)
+      token=${note#\[key=}
+      token=${token%%\]*}
+      note=${note#*\]}
+      note=${note#"${note%%[![:space:]]*}"}
+      keyed=1
+      ;;
+  esac
+  # A pre-colon token wins when both positions carry one, and the note is
+  # stripped either way so the token is never both the key and part of the note.
+  case "$prefix" in
+    *\[key=*\]*)
+      token=${prefix#*\[key=}
+      token=${token%%\]*}
+      keyed=1
+      ;;
+  esac
+  if [ "$keyed" -eq 0 ]; then
+    _FM_DECISION_KEY=default
+    _FM_DECISION_NOTE=$note
+    return 0
+  fi
+  case "$token" in
+    ''|*[!A-Za-z0-9._-]*)
+      _FM_DECISION_KEY=default
+      _FM_DECISION_NOTE="[unparseable key '$token'; filed under default]"
+      [ -z "$note" ] || _FM_DECISION_NOTE="$_FM_DECISION_NOTE $note"
+      ;;
+    *)
+      _FM_DECISION_KEY=$token
+      _FM_DECISION_NOTE=$note
+      ;;
+  esac
+}
 status_line_verb() {  # <status-line> -> leading verb word
-  local v=${1%%:*}
-  v=${v%%\[key=*}
-  v=${v#"${v%%[![:space:]]*}"}
-  v=${v%"${v##*[![:space:]]}"}
-  printf '%s' "$v"
+  local _FM_DECISION_VERB _FM_DECISION_KEY _FM_DECISION_NOTE
+  _fm_decision_parse "$1"
+  printf '%s' "$_FM_DECISION_VERB"
 }
 status_line_note() {  # <status-line> -> text after the first colon, trimmed
   case "$1" in
@@ -180,20 +261,31 @@ status_line_note() {  # <status-line> -> text after the first colon, trimmed
     *) printf '%s' "$1" ;;
   esac
 }
-_fm_decision_key() {  # <status-line> -> key slug, or "default" when no token
-  local prefix=${1%%:*} k
-  case "$prefix" in
-    *\[key=*\]*)
-      k=${prefix#*\[key=}
-      k=${k%%\]*}
-      case "$k" in
-        ''|*[!A-Za-z0-9._-]*) return 1 ;;
-        *) printf '%s' "$k" ;;
-      esac
-      ;;
-    *) printf 'default' ;;
-  esac
+# Append one line to a status stream so it can never weld onto an unterminated
+# last line. A status file has many independent appenders - fm-send's
+# answer-time close, the decision-hold transfer, the pending-reply library, the
+# remote-reply mirror, and a worker's own `echo >>` - and a worker's shell can
+# leave the file with no trailing newline (a `printf` without one, or a killed
+# write). A plain `>>` then joins the new line onto the previous one, producing
+# ONE line carrying two verbs. That is precisely how the two folds below come to
+# disagree: the whole-file fold re-reads the welded line, sees the OLDER verb
+# first, and still reports the decision open, while the cursor-backed fold has
+# already consumed the earlier bytes and folds only the appended remainder, so
+# it reports the same decision closed. Terminating first is what keeps every
+# consumer of this stream reading the same records.
+fm_status_append() {  # <status-file> <line>
+  local f=$1 line=$2 last
+  if [ -s "$f" ]; then
+    # The trailing `x` survives command substitution's newline stripping, so a
+    # final newline is still distinguishable from a final ordinary byte.
+    last=$(LC_ALL=C tail -c 1 "$f" 2>/dev/null; printf x) || return 1
+    if [ "$last" != $'\n'x ]; then
+      printf '\n' >> "$f" || return 1
+    fi
+  fi
+  printf '%s\n' "$line" >> "$f"
 }
+
 # Drop the record for <key> from a newline-terminated "<key>\t<verb>\t<note>" set.
 # Portable (no associative arrays) so the fold runs on bash 3.2 as well as 4+.
 _fm_decision_drop() {  # <open-set> <key>
@@ -253,22 +345,21 @@ _fm_decision_key_transition_allowed() {  # <key> <note>
 }
 
 _fm_decision_fold_line() {  # <open-set> <status-line> <resolve-verb> <held-verb>
-  local open=$1 line=$2 resolve=$3 held=$4 verb key note stripped
+  local open=$1 line=$2 resolve=$3 held=$4 stripped
+  local _FM_DECISION_VERB _FM_DECISION_KEY _FM_DECISION_NOTE
   stripped=${line//[[:space:]]/}
   [ -n "$stripped" ] || { printf '%s' "$open"; return 0; }
-  verb=$(status_line_verb "$line")
-  key=$(_fm_decision_key "$line") || { printf '%s' "$open"; return 0; }
-  _fm_decision_key_transition_allowed "$key" "$(status_line_note "$line")" \
+  _fm_decision_parse "$line"
+  _fm_decision_key_transition_allowed "$_FM_DECISION_KEY" "$_FM_DECISION_NOTE" \
     || { printf '%s' "$open"; return 0; }
-  case "$verb" in
+  case "$_FM_DECISION_VERB" in
     needs-decision|blocked)
-      note=$(status_line_note "$line")
-      open=$(_fm_decision_drop "$open" "$key")
+      open=$(_fm_decision_drop "$open" "$_FM_DECISION_KEY")
       [ -n "$open" ] && open="${open}"$'\n'
-      open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+      open="${open}${_FM_DECISION_KEY}"$'\t'"${_FM_DECISION_VERB}"$'\t'"${_FM_DECISION_NOTE}"$'\n'
       ;;
     "$resolve"|"$held")
-      open=$(_fm_decision_drop "$open" "$key")
+      open=$(_fm_decision_drop "$open" "$_FM_DECISION_KEY")
       [ -n "$open" ] && open="${open}"$'\n'
       ;;
   esac
@@ -384,7 +475,14 @@ _fm_open_decisions_cursor_path() {  # <status-file>
   printf '%s/.%s.open-decisions-cursor' "$dir" "${base%.status}"
 }
 
-FM_OPEN_DECISIONS_FOLD_VERSION=2
+# Bump whenever the fold's per-line semantics change, so a cursor persisted
+# under the old rule is invalidated and its file re-folded from byte 0 instead
+# of serving a stale open set. Version 3 recognized a post-colon "[key=<slug>]"
+# token; version 4 folds a line whose token is unparseable onto "default" with a
+# marker instead of dropping it (see the decision key grammar above). An older
+# cursor's already-folded bytes were keyed under the old rule - and, before
+# version 4, could have dropped a record outright - so they must not be trusted.
+FM_OPEN_DECISIONS_FOLD_VERSION=4
 
 # Portable device:inode identity for the rotation/recreation check below.
 _fm_open_decisions_file_ident() {  # <file> -> "dev:inode", empty on I/O failure
@@ -532,24 +630,23 @@ EOF
 # It is never authoritative current crew state, and consumers must not let an open
 # phase outrank a structured home snapshot or fm-crew-state result.
 _fm_status_open_activities_stream() {
-  local line verb key note resolve held open='' stripped pause
+  local line resolve held open='' stripped pause
+  local _FM_DECISION_VERB _FM_DECISION_KEY _FM_DECISION_NOTE
   resolve=${FM_CLASSIFY_RESOLVE_VERB:-$FM_CLASSIFY_RESOLVE_VERB_DEFAULT}
   held=${FM_CLASSIFY_CAPTAIN_HELD_VERB:-$FM_CLASSIFY_CAPTAIN_HELD_VERB_DEFAULT}
   pause=${FM_CLASSIFY_PAUSED_VERB:-$FM_CLASSIFY_PAUSED_VERB_DEFAULT}
   while IFS= read -r line || [ -n "$line" ]; do
     stripped=${line//[[:space:]]/}
     [ -n "$stripped" ] || continue
-    verb=$(status_line_verb "$line")
-    key=$(_fm_decision_key "$line") || continue
-    case "$verb" in
+    _fm_decision_parse "$line"
+    case "$_FM_DECISION_VERB" in
       working|"$pause")
-        note=$(status_line_note "$line")
-        open=$(_fm_decision_drop "$open" "$key")
+        open=$(_fm_decision_drop "$open" "$_FM_DECISION_KEY")
         [ -n "$open" ] && open="${open}"$'\n'
-        open="${open}${key}"$'\t'"${verb}"$'\t'"${note}"$'\n'
+        open="${open}${_FM_DECISION_KEY}"$'\t'"${_FM_DECISION_VERB}"$'\t'"${_FM_DECISION_NOTE}"$'\n'
         ;;
       done|failed|needs-decision|blocked|"$resolve"|"$held")
-        open=$(_fm_decision_drop "$open" "$key")
+        open=$(_fm_decision_drop "$open" "$_FM_DECISION_KEY")
         [ -n "$open" ] && open="${open}"$'\n'
         ;;
     esac

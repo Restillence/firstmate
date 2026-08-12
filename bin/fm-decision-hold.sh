@@ -348,7 +348,7 @@ EOF
     while IFS=$'\t' read -r key _verb _summary; do
       [ -n "$key" ] || continue
       list_has_key "$keys" "$key" || continue
-      printf 'captain-held [key=%s]: tracked by %s\n' "$key" "$(hold_id "$origin" "$key")" >> "$status_file"
+      fm_status_append "$status_file" "captain-held [key=$key]: tracked by $(hold_id "$origin" "$key")"
       key_seen=1
     done <<EOF
 $raw_open

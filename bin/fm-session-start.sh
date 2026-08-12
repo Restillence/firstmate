@@ -152,9 +152,9 @@
 # compatible tasks-axi is available, or `data/backlog.md` when the file body is
 # truly needed.
 #
-# STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many lines each task's
-# tail prints, and bin/fm-line-cap-lib.sh bounds how long each of those lines
-# may be. Both bounds are safe because the section prints every task's full
+# STATUS TAILS: FM_SESSION_START_STATUS_TAIL bounds how many non-blank lines
+# each task's tail prints, and bin/fm-line-cap-lib.sh bounds how long each of
+# those lines may be. Both bounds are safe because the section prints every task's full
 # status log path, and AGENTS.md section 8 treats a status line as a wake EVENT
 # rather than current state - bin/fm-crew-state.sh owns current state.
 #
@@ -471,15 +471,18 @@ print_backlog_compact() {
 
 print_status_tail() {
   local status=$1 line
-  printf 'status tail (last %s line(s), each capped at %s characters, wake-EVENT history, not current state; full log: %s):\n' \
+  printf 'status tail (last %s non-blank line(s), each capped at %s characters, wake-EVENT history, not current state; full log: %s):\n' \
     "$STATUS_TAIL" "$FM_LINE_CAP_DEFAULT" "$status"
   # A crewmate writes its own status lines, so their length is unbounded: one
   # observed line ran 865 characters. Cap each one the way the wake digest's
   # OPEN DECISIONS section does; the lede carries the state word and the key,
   # and the full log path above reaches the rest.
+  # Drop blank lines BEFORE the tail, the same way last_status_line does, so the
+  # separator a leading-newline append leaves behind cannot consume tail slots
+  # that a real status record would otherwise fill.
   while IFS= read -r line || [ -n "$line" ]; do
     fm_cap_line "$line"
-  done < <(tail -n "$STATUS_TAIL" "$status")
+  done < <(grep -v '^[[:space:]]*$' "$status" 2>/dev/null | tail -n "$STATUS_TAIL")
 }
 
 hash_file() {

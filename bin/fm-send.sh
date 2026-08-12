@@ -364,11 +364,21 @@ if [ -n "$RESOLVE_KEYS" ]; then
   RESOLVE_TASK_ID=$(fm_send_id_from_meta "$TARGET_META")
   RESOLVE_STATUS_FILE="$STATE/$RESOLVE_TASK_ID.status"
   resolve_open_set=$(status_open_decisions "$RESOLVE_STATUS_FILE")
+  # The refusal names what the fold actually observed - the keys open right now
+  # in this ledger - rather than guessing between several possible causes. A
+  # mistype is then visible by comparison, and a key that folded onto some OTHER
+  # key names that other key instead of sending the operator back to re-read a
+  # listing that already looked right to them.
+  resolve_open_keys=$(printf '%s' "$resolve_open_set" | LC_ALL=C cut -f1 | LC_ALL=C paste -sd, -)
   for k in $RESOLVE_KEYS; do
     case "$resolve_open_set" in
       "$k"$'\t'*|*$'\n'"$k"$'\t'*) ;;
       *)
-        echo "error: --resolve-key '$k': no open decision or blocker with that key in $RESOLVE_STATUS_FILE (already closed, mistyped, or transferred). Re-check the OPEN DECISIONS listing, then resend without that key or with the right one; nothing was sent." >&2
+        if [ -n "$resolve_open_keys" ]; then
+          echo "error: --resolve-key '$k': that key is not open in $RESOLVE_STATUS_FILE. Open there right now: $resolve_open_keys. Resend with one of those keys, or without --resolve-key; nothing was sent." >&2
+        else
+          echo "error: --resolve-key '$k': no decision or blocker is open in $RESOLVE_STATUS_FILE at all. Resend without --resolve-key; nothing was sent." >&2
+        fi
         exit 1
         ;;
     esac
@@ -384,8 +394,10 @@ fm_send_close_resolved_keys() {  # <answer-text>
   for k in $RESOLVE_KEYS; do
     line="resolved [key=$k]: answered: $note"
     fm_cap_line_var "$line"
-    if ! printf '%s\n' "$FM_LINE_CAP_LINE" >> "$RESOLVE_STATUS_FILE"; then
-      echo "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: echo 'resolved [key=$k]: <how it was answered>' >> $RESOLVE_STATUS_FILE - do not resend the answer." >&2
+    if ! fm_status_append "$RESOLVE_STATUS_FILE" "$FM_LINE_CAP_LINE"; then
+      # printf, not echo: the hint quotes a printf command whose \n must reach
+      # the operator as literal text to copy, not be expanded into this message.
+      printf '%s\n' "error: the answer was delivered to $T, but decision key '$k' could not be closed in $RESOLVE_STATUS_FILE. Close it manually with: printf '\nresolved [key=$k]: <how it was answered>\n' >> $RESOLVE_STATUS_FILE - the leading newline is what keeps the close off the end of an unterminated last line. Do not resend the answer." >&2
       return 1
     fi
   done

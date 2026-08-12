@@ -906,6 +906,10 @@ fm_pending_reply_close_escalation() {  # <state-dir> <corr_id>
 _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   local state=$1 corr=$2 rec escalated closed parent_status escalation key note
   local open_line open_key open_note now
+  # The comparison note must come out of the same reader that built the open-set
+  # lines it is compared against, or the two diverge the moment an escalation
+  # note begins with a key token and the close never matches.
+  local _FM_DECISION_VERB _FM_DECISION_KEY _FM_DECISION_NOTE
   rec=$(fm_pending_reply_path "$state" "$corr")
   [ -f "$rec" ] || return 1
   [ "$(fm_pending_reply_get "$rec" phase)" = resolved ] || return 0
@@ -917,8 +921,9 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
   [ -n "$parent_status" ] || return 1
   escalation=$(fm_pending_reply_escalation_line "$parent_status" "$rec" "$corr")
   if [ -n "$escalation" ]; then
-    key=$(_fm_decision_key "$escalation") || key=''
-    note=$(status_line_note "$escalation")
+    _fm_decision_parse "$escalation"
+    key=$_FM_DECISION_KEY
+    note=$_FM_DECISION_NOTE
     while IFS= read -r open_line; do
       [ -n "$open_line" ] || continue
       open_key=${open_line%%$'\t'*}
@@ -926,10 +931,9 @@ _fm_pending_reply_close_escalation_locked() {  # <state-dir> <corr_id>
       open_note=${open_line#*$'\t'}
       open_note=${open_note#*$'\t'}
       [ "$open_note" = "$note" ] || continue
-      printf 'resolved [key=%s]: pending-reply-resolved: task=%s pending-reply-id=%s via=%s\n' \
-        "$key" "$(fm_pending_reply_get "$rec" task_id)" "$corr" \
-        "$(fm_pending_reply_get "$rec" resolved_via)" \
-        >> "$parent_status" 2>/dev/null || return 1
+      fm_status_append "$parent_status" \
+        "resolved [key=$key]: pending-reply-resolved: task=$(fm_pending_reply_get "$rec" task_id) pending-reply-id=$corr via=$(fm_pending_reply_get "$rec" resolved_via)" \
+        2>/dev/null || return 1
       break
     done <<EOF
 $(status_open_decisions "$parent_status")
@@ -995,7 +999,7 @@ _fm_pending_reply_maybe_escalate_locked() {  # <state-dir> <corr_id>
   mkdir -p "$(dirname "$parent_status")" 2>/dev/null || return 1
   line="blocked [key=$(fm_pending_reply_escalation_key "$corr")]: $payload"
   if ! grep -Fqx "$line" "$parent_status" 2>/dev/null; then
-    printf '%s\n' "$line" >> "$parent_status" 2>/dev/null || return 1
+    fm_status_append "$parent_status" "$line" 2>/dev/null || return 1
   fi
   now=$(fm_pending_reply_now)
   fm_pending_reply_set "$rec" escalated_epoch "$now" || return 1
