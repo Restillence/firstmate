@@ -197,6 +197,12 @@ test_zero_changed_files_exits_clean() {
   tmp=$(fm_test_tmproot fm-lint-zero-changed)
   fakebin=$(fm_fakebin "$tmp")
   fm_lint_stub_git "$fakebin"
+  # The empty-target exit sits behind the ShellCheck resolution gate, and this
+  # case asserts the pinned version line, so stub ShellCheck the same way its
+  # three sibling changed-mode cases do. Reading it off the host instead made
+  # this the one case in the file that could not run without ShellCheck
+  # installed, where every other version-dependent case self-skips.
+  fm_lint_stub_shellcheck "$fakebin" "$tmp/shellcheck.log"
   diff_file="$tmp/diff.nul"
   : > "$diff_file"
 
