@@ -40,7 +40,9 @@ chmod +x "$LOW/fmtool-low-only"
 # newer toolchain ahead of /usr/bin (a Nix store git before the distro git) gets
 # that version in every fixture that reads FM_TEST_BASE_PATH directly, and the
 # mirror has to agree with them: otherwise the override is silently defeated for
-# exactly the fixtures built on this helper, and nothing reports the swap.
+# exactly the fixtures built on this helper, and nothing reports the swap. This
+# catches the mirror linking its source directories front to back, where the
+# LAST one linked wins the overwrite and the lowest-priority directory answers.
 mirror=$(FM_TEST_BASE_PATH="$HIGH:$LOW" \
   fm_test_system_path_without "$TMP_ROOT/mirror-high-first" fmtool-withheld) \
   || fail "fm_test_system_path_without failed with a two-directory base path"
@@ -69,7 +71,8 @@ pass "the winning directory follows the base path order rather than a fixed side
 pass "a named tool stays absent even when every base path directory carries it"
 
 # Everything the base path offers and the caller did not withhold must survive,
-# including a name carried by the lower-priority directory alone.
+# including a name carried by the lower-priority directory alone. This catches a
+# mirror that keeps precedence by linking only the first directory it is given.
 got=$(PATH="$mirror" fmtool-low-only)
 [ "$got" = LOW-ONLY ] \
   || fail "the mirror dropped a name carried only by the lower-priority directory"
@@ -78,13 +81,24 @@ pass "the mirror keeps every name the base path offers that was not withheld"
 # --- fm_test_system_path_without: entry shapes -------------------------------
 
 # An empty source directory expands to a literal glob rather than to nothing, so
-# a mirror that linked it blindly would grow an entry named '*'. A missing
-# directory and a blank base path field are equally non-fatal.
+# a mirror that stopped screening for that would link an entry named '*'. It
+# would be a symlink to a path that does not exist, and a plain existence test
+# stats THROUGH a symlink and reports nothing there, so the entry has to be
+# tested as a link: this catches the unmatched-glob screen going away.
 mkdir -p "$TMP_ROOT/empty"
 sparse=$(FM_TEST_BASE_PATH="$TMP_ROOT/empty::$TMP_ROOT/does-not-exist:$HIGH" \
   fm_test_system_path_without "$TMP_ROOT/mirror-sparse" fmtool-withheld) \
   || fail "fm_test_system_path_without failed on an empty, missing, or blank base path entry"
-assert_absent "$sparse/*" "the mirror linked an unmatched glob as a literal entry"
+[ ! -L "$sparse/*" ] && [ ! -e "$sparse/*" ] \
+  || fail "the mirror linked an unmatched glob as a literal entry"
+# A blank field is the other half of that screen: '' globs to '/*', which DOES
+# expand, so a mirror that stopped rejecting a non-directory source would link
+# the filesystem root into the farm. Neither source directory here can supply a
+# root-only name, so finding one is proof of exactly that.
+for root_only in etc dev; do
+  [ ! -e "$sparse/$root_only" ] && [ ! -L "$sparse/$root_only" ] \
+    || fail "a blank base path field mirrored the filesystem root into the farm"
+done
 got=$(PATH="$sparse" fmtool)
 [ "$got" = HIGH ] \
   || fail "a sparse base path lost the directory that does carry the tool"
@@ -92,7 +106,8 @@ pass "empty, missing, and blank base path entries are skipped without breaking t
 
 # A dangling symlink is a real PATH entry: a fixture may be about what happens
 # when a tool resolves to a broken link, so the mirror carries it rather than
-# silently pruning it.
+# silently pruning it. This catches a mirror that ever starts filtering its
+# entries by whether they resolve.
 ln -s "$TMP_ROOT/nowhere" "$HIGH/fmtool-dangling"
 dangling=$(FM_TEST_BASE_PATH="$HIGH" \
   fm_test_system_path_without "$TMP_ROOT/mirror-dangling" fmtool-withheld) \
