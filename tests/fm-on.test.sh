@@ -344,7 +344,9 @@ ln -sf "$(command -v bash)" "$DOCTOR_BIN/bash"
 # writing the file, and a symlink there would send that write to the host's own
 # installed tool.
 for tool in git jq; do
-  printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$(command -v "$tool")" > "$DOCTOR_BIN/$tool"
+  tool_path=$(command -v "$tool") \
+    || fail "this case needs $tool on the host PATH to forward to, and it does not resolve"
+  printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$tool_path" > "$DOCTOR_BIN/$tool"
   chmod +x "$DOCTOR_BIN/$tool"
 done
 # Report a non-darwin host so this file keeps testing tool resolution alone and

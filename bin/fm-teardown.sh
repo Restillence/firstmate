@@ -859,9 +859,17 @@ pr_is_merged() {
 # form, but it only exists from Git 2.38 and older Git rejects the flag as an
 # unknown revision - which retired the whole content check below rather than
 # answering it, so every squash-landed worktree false-refused teardown on those
-# hosts. The fallback runs the same merge through a scratch index: an
-# unresolvable path stays unmerged there and write-tree refuses, so both forms
-# report a conflict as inconclusive exactly as the caller requires.
+# hosts. The fallback runs the merge through a scratch index with
+# `read-tree -m --aggressive`, which resolves only trivial stage combinations and
+# never performs a content-level merge, so before Git 2.38 it can answer only
+# when every path the branch touched resolves trivially. When the default branch
+# also modified a path the branch touched, those stages stay unmerged, write-tree
+# refuses, and the caller reports inconclusive - where merge-tree --write-tree
+# would have content-merged them and could have proven the content landed. The
+# fallback is therefore narrower than the primary form, but the difference is
+# always in the refusing direction, so it never risks discarding work that has
+# not landed, and it is still strictly better than the previous behaviour of
+# never answering at all on older Git.
 # Returns non-zero when the merge cannot be completed.
 merged_tree_with_head() {  # <ref>
   local ref=$1 base scratch index tree
