@@ -45,6 +45,8 @@ See the [no-mistakes quick start](https://kunchenguid.github.io/no-mistakes/star
 - Helper scripts in `bin/` are plain bash.
   Each starts with a usage header comment; keep it accurate when you change behavior.
   Test scripts and helpers in `tests/` are plain bash too.
+  A fixture that depends on a host tool being present must expose that tool itself rather than assume where the host installs it, and one that must present a host WITHOUT a tool needs `tests/lib.sh`'s `fm_test_system_path_without`, because deleting a stub only falls through to whatever the runner keeps in a system directory.
+  Either assumption makes the same fixture a real test on one host and a vacuous pass on another.
   `bin/fm-lint.sh` must pass: it is the single owner of the lint definition (the shellcheck file set, config, and pinned shellcheck version), and both CI and the no-mistakes pre-push gate run it, so local and CI can never diverge.
   It pins one exact shellcheck version and refuses to run under any other; print it with `bin/fm-lint.sh --required-version` and install that build locally.
 - Harness-adapter ownership spans detection in `bin/fm-harness.sh`, launch and hook mechanics in `bin/fm-spawn.sh`, semantic busy sources and trust gates in `bin/fm-busy-lib.sh`, delivery-only rendered guards in `bin/fm-tmux-lib.sh`, cleanup in `bin/fm-teardown.sh`, and facts in `.agents/skills/harness-adapters/SKILL.md`; the `firstmate-coding-guidelines` skill owns the validation policy for checks that depend on those harnesses.
