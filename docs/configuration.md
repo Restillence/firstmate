@@ -238,7 +238,9 @@ Those inherited values are defaults and rules only; `fm-spawn` still permits a c
 For grok, `fm-spawn.sh` installs one firstmate-owned global turn-end hook under `$GROK_HOME/hooks/`, or `~/.grok/hooks/` when `GROK_HOME` is unset, and drops a per-task `.fm-grok-turnend` pointer in the worktree, with teardown removing the task token and pointer.
 For Kimi crews, `fm-spawn.sh` runs `fm-kimi-turnend-hook.sh install`, drops a per-task `.fm-kimi-turnend` pointer in the worktree, and records the matching private registry token for teardown.
 Kimi continues to use the captain's normal Kimi home, including the existing config, skills, and memory; Firstmate does not create an isolated Kimi home.
-The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `python3` with `tomllib`, and `jq`; it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
+The Kimi installer requires an existing regular non-symlink `~/.kimi-code/config.toml`, `jq`, and a Python interpreter carrying `tomllib` (3.11 or newer); it validates but never serializes the captain's TOML and refuses before writing when the config is missing, malformed, or surprising or when either tool requirement is unavailable.
+The interpreter does not have to be `python3` itself: the installer discovers one, so a host whose default `python3` predates 3.11 still works when a newer one is installed in a conventional place.
+`fm-kimi-turnend-hook.sh check` prints the interpreter that would be used and `fm-kimi-turnend-hook.sh --help` owns the search order, while `FM_KIMI_PYTHON` names an interpreter directly on a host that keeps its own elsewhere.
 Its `remove` action excises only the marker-delimited Firstmate region and removes Firstmate's hook files.
 For Pi and pi-signed secondmate launches, `fm-spawn.sh` starts the selected executable with `-e` pointed at the secondmate home's own tracked `.pi/extensions/fm-primary-pi-watch.ts` and `.pi/extensions/fm-primary-turnend-guard.ts`, both already present from the secondmate home's git worktree.
 

@@ -15,6 +15,28 @@ PYTHON_BIN_DIR=$(dirname "$PYTHON_BIN")
 JQ_BIN=$(command -v jq) || fail "test needs jq"
 BASE_PATH=${FM_TEST_BASE_PATH:-$PYTHON_BIN_DIR:/usr/bin:/bin:/usr/sbin:/sbin}
 
+# The Kimi installer validates config.toml with tomllib, which needs Python 3.11
+# or newer, and discovers a suitable interpreter for itself. Ask it which one it
+# would use rather than re-deriving that search here. Empty means this host has
+# none, and every case that needs one skips visibly instead of failing.
+TOML_PYTHON=$("$KIMI_HOOK" check 2>/dev/null) || TOML_PYTHON=
+
+# Fixture homes are built empty, so they never carry the interpreter a real home
+# would offer. Pin the one this host actually has for cases about the
+# config-editing contract; discovery itself has its own regression below.
+kimi_hook() {
+  local home=$1
+  shift
+  HOME="$home" FM_KIMI_PYTHON="$TOML_PYTHON" "$KIMI_HOOK" "$@"
+}
+
+# Emit the visible per-case skip when this host cannot validate TOML at all.
+require_toml_python() {
+  [ -z "$TOML_PYTHON" ] || return 0
+  printf 'skip: no Python 3.11+ interpreter with tomllib on this host (%s)\n' "$1"
+  return 1
+}
+
 cleanup_kimi_harness() {
   [ -z "$KIMI_RUNTIME_TASK_TMP" ] || rm -rf "$KIMI_RUNTIME_TASK_TMP"
   rm -rf "$TMP_ROOT"
@@ -166,6 +188,7 @@ run_spawn() {
     FM_FAKE_TMUX_CALL_LOG="$case_dir/tmux-calls.log" \
     FM_FAKE_BRIEF_REAL="$(cd "$home/data/$id" && pwd -P)/brief.md" \
     FM_KIMI_READY_POLLS=2 FM_KIMI_DELIVERY_POLLS=2 FM_KIMI_POLL_INTERVAL=0 \
+    FM_KIMI_PYTHON="$TOML_PYTHON" \
     PATH="$fakebin:$BASE_PATH" \
     "$SPAWN" "$id" "$proj" --harness kimi --mode no-mistakes --yolo off "$@" 2>&1
 }
@@ -178,6 +201,7 @@ EOF
 
 test_kimi_launch_then_send_is_verified() {
   local id rec out rc launch pointer brief_real meta task_tmp
+  require_toml_python "Kimi launch and brief delivery" || return 0
   id="kimi-success-z1-$$"
   task_tmp="/tmp/fm-$id"
   KIMI_RUNTIME_TASK_TMP=$task_tmp
@@ -218,6 +242,7 @@ test_kimi_launch_then_send_is_verified() {
 
 test_kimi_hook_install_is_surgical_idempotent_and_removable() {
   local home config original once stripped count
+  require_toml_python "Kimi hook install is surgical" || return 0
   home="$TMP_ROOT/config-surgery"
   config="$home/.kimi-code/config.toml"
   original="$home/original.toml"
@@ -245,14 +270,14 @@ model = "some/model"
 EOF
   cp "$config" "$original"
 
-  HOME="$home" "$KIMI_HOOK" install || fail "Kimi hook install refused a realistic config"
+  kimi_hook "$home" install || fail "Kimi hook install refused a realistic config"
   cp "$config" "$once"
-  HOME="$home" "$KIMI_HOOK" install || fail "second Kimi hook install failed"
+  kimi_hook "$home" install || fail "second Kimi hook install failed"
   cmp -s "$once" "$config" || fail "second Kimi hook install changed config bytes"
   count=$(grep -c '^# BEGIN FIRSTMATE KIMI TURN-END HOOK' "$config")
   [ "$count" -eq 1 ] || fail "idempotent install left $count Firstmate regions"
 
-  HOME="$home" "$KIMI_HOOK" remove || fail "Kimi hook removal failed"
+  kimi_hook "$home" remove || fail "Kimi hook removal failed"
   cp "$config" "$stripped"
   cmp -s "$original" "$stripped" \
     || fail "config with the Firstmate region excised was not byte-identical to the original"
@@ -263,6 +288,7 @@ EOF
 
 test_kimi_hook_remove_preserves_owned_newline_boundary() {
   local appended config expected home original
+  require_toml_python "Kimi hook owned-newline boundary" || return 0
   home="$TMP_ROOT/config-owned-newline"
   config="$home/.kimi-code/config.toml"
   original="$home/original.toml"
@@ -272,15 +298,15 @@ test_kimi_hook_remove_preserves_owned_newline_boundary() {
   printf 'default_model = "test"' > "$config"
   cp "$config" "$original"
 
-  HOME="$home" "$KIMI_HOOK" install || fail "Kimi hook install refused config without a final newline"
-  HOME="$home" "$KIMI_HOOK" remove || fail "Kimi hook removal failed without appended config"
+  kimi_hook "$home" install || fail "Kimi hook install refused config without a final newline"
+  kimi_hook "$home" remove || fail "Kimi hook removal failed without appended config"
   cmp -s "$original" "$config" \
     || fail "pristine removal did not restore the absent final newline byte-identically"
 
-  HOME="$home" "$KIMI_HOOK" install || fail "second Kimi hook install refused config without a final newline"
+  kimi_hook "$home" install || fail "second Kimi hook install refused config without a final newline"
   printf '[captain]\nenabled = true\n' > "$appended"
   cat "$appended" >> "$config"
-  HOME="$home" "$KIMI_HOOK" remove || fail "Kimi hook removal joined config appended after its region"
+  kimi_hook "$home" remove || fail "Kimi hook removal joined config appended after its region"
   {
     cat "$original"
     printf '\n'
@@ -288,25 +314,28 @@ test_kimi_hook_remove_preserves_owned_newline_boundary() {
   } > "$expected"
   cmp -s "$expected" "$config" \
     || fail "removal did not preserve appended captain config on its own line"
-  "$PYTHON_BIN" - "$config" <<'PY' || fail "config with appended captain TOML did not parse after removal"
-import sys
-import tomllib
 
-with open(sys.argv[1], "rb") as stream:
-    tomllib.load(stream)
-PY
+  # The installer parses config.toml and refuses malformed TOML, so a further
+  # install/remove round-trip proves the post-removal bytes still parse without
+  # standing up a second parser here, and proves the round-trip is stable.
+  kimi_hook "$home" install \
+    || fail "config with appended captain TOML did not parse after removal"
+  kimi_hook "$home" remove || fail "Kimi hook removal failed on the reparsed config"
+  cmp -s "$expected" "$config" \
+    || fail "the parse round-trip did not restore the post-removal bytes"
   pass "Kimi hook removal preserves owned newline boundaries and pristine bytes"
 }
 
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config() {
   local missing malformed partial out rc
+  require_toml_python "Kimi hook fails closed on surprising config" || return 0
   missing="$TMP_ROOT/config-missing"
   malformed="$TMP_ROOT/config-malformed"
   partial="$TMP_ROOT/config-partial"
   mkdir -p "$missing/.kimi-code" "$malformed/.kimi-code" "$partial/.kimi-code"
 
   rc=0
-  out=$(HOME="$missing" "$KIMI_HOOK" install 2>&1) || rc=$?
+  out=$(kimi_hook "$missing" install 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "missing Kimi config was accepted"
   assert_contains "$out" "Kimi config is missing" "missing config refusal lacked its concrete reason"
   assert_absent "$missing/.kimi-code/fm-turn-end.sh" "missing config refusal wrote the hook script"
@@ -314,7 +343,7 @@ test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config() {
   printf '[broken\n' > "$malformed/.kimi-code/config.toml"
   cp "$malformed/.kimi-code/config.toml" "$malformed/before"
   rc=0
-  out=$(HOME="$malformed" "$KIMI_HOOK" install 2>&1) || rc=$?
+  out=$(kimi_hook "$malformed" install 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "malformed Kimi config was accepted"
   assert_contains "$out" "malformed TOML" "malformed config refusal lacked its concrete reason"
   cmp -s "$malformed/before" "$malformed/.kimi-code/config.toml" \
@@ -324,7 +353,7 @@ test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config() {
   printf '# BEGIN FIRSTMATE KIMI TURN-END HOOK\n' > "$partial/.kimi-code/config.toml"
   cp "$partial/.kimi-code/config.toml" "$partial/before"
   rc=0
-  out=$(HOME="$partial" "$KIMI_HOOK" install 2>&1) || rc=$?
+  out=$(kimi_hook "$partial" install 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "partial Firstmate marker was accepted"
   assert_contains "$out" "partial, duplicated, or altered" "partial marker refusal lacked its concrete reason"
   cmp -s "$partial/before" "$partial/.kimi-code/config.toml" \
@@ -345,17 +374,88 @@ test_kimi_hook_install_refuses_without_jq() {
   ln -s "$(command -v python3)" "$fakebin/python3"
 
   rc=0
-  out=$(HOME="$home" PATH="$fakebin" "$KIMI_HOOK" install 2>&1) || rc=$?
+  out=$(HOME="$home" PATH="$fakebin" FM_KIMI_PYTHON="$TOML_PYTHON" "$KIMI_HOOK" install 2>&1) || rc=$?
   [ "$rc" -ne 0 ] || fail "Kimi hook install succeeded without jq"
   assert_contains "$out" "jq is required" "missing-jq refusal did not name jq"
   cmp -s "$before" "$config" || fail "missing-jq refusal changed config bytes"
   assert_absent "$home/.kimi-code/fm-turn-end.sh" "missing-jq refusal wrote the hook script"
   assert_absent "$home/.kimi-code/fm-turn-end.d" "missing-jq refusal wrote the registry"
+
+  # jq is named whatever the interpreter situation is. Without the pin above,
+  # discovery is left to find whatever this host has, which on an older one is
+  # nothing; naming the interpreter there would send the captain after the wrong
+  # missing tool, since jq is required either way.
+  rc=0
+  out=$(HOME="$home" PATH="$fakebin" "$KIMI_HOOK" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "Kimi hook install succeeded without jq or an interpreter"
+  assert_contains "$out" "jq is required" \
+    "missing-jq refusal named the interpreter instead of jq when both were absent"
+  cmp -s "$before" "$config" || fail "missing-jq refusal changed config bytes"
   pass "Kimi hook install refuses without jq before any config write"
+}
+
+test_kimi_hook_help_covers_every_verb_and_stops_at_the_header() {
+  local out
+  # The header is extracted by line range, so it silently truncates or spills
+  # into code whenever the comment block above it grows. Pin both ends.
+  out=$("$KIMI_HOOK" --help 2>&1) || fail "Kimi hook --help did not exit zero"
+  assert_contains "$out" "fm-kimi-turnend-hook.sh install" "help omitted the install verb"
+  assert_contains "$out" "fm-kimi-turnend-hook.sh remove" "help omitted the remove verb"
+  assert_contains "$out" "fm-kimi-turnend-hook.sh check" "help omitted the check verb"
+  assert_not_contains "$out" "set -u" "help spilled past the header into script code"
+  pass "Kimi hook help documents every verb without spilling past the header"
+}
+
+test_kimi_hook_discovers_an_interpreter_beyond_python3() {
+  local home config fakebin out rc
+  require_toml_python "Kimi hook interpreter discovery" || return 0
+  home="$TMP_ROOT/config-discovery"
+  config="$home/.kimi-code/config.toml"
+  fakebin=$(fm_fakebin "$home/only-old-python3")
+  mkdir -p "$home/.kimi-code" "$home/.local/bin"
+  printf '# Captain config\nmodel = "test"\n' > "$config"
+  ln -s "$(command -v bash)" "$fakebin/bash"
+  ln -s "$JQ_BIN" "$fakebin/jq"
+  # Stands in for a system python3 predating tomllib. It refuses everything, so
+  # selecting it would fail the install loudly rather than pass by accident.
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'python3 stub: no tomllib, this interpreter must not be selected\n' >&2
+exit 1
+SH
+  chmod +x "$fakebin/python3"
+
+  # No FM_KIMI_PYTHON here: the installer has to find the newer interpreter on
+  # its own, exactly as it must on a host whose default python3 is too old.
+  ln -s "$TOML_PYTHON" "$home/.local/bin/python3.12"
+  rc=0
+  out=$(HOME="$home" PATH="$fakebin" "$KIMI_HOOK" check 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "installer found no interpreter despite one in the local bin: $out"
+  [ "$out" = "$home/.local/bin/python3.12" ] \
+    || fail "installer did not report the interpreter it discovered past python3: $out"
+  rc=0
+  out=$(HOME="$home" PATH="$fakebin" "$KIMI_HOOK" install 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "installer refused despite a discoverable interpreter: $out"
+  assert_grep '# BEGIN FIRSTMATE KIMI TURN-END HOOK' "$config" \
+    "discovered interpreter did not install the Firstmate region"
+  HOME="$home" PATH="$fakebin" "$KIMI_HOOK" remove \
+    || fail "installer could not remove through the discovered interpreter"
+
+  # And with nothing discoverable it refuses rather than writing unvalidated.
+  rm "$home/.local/bin/python3.12"
+  rc=0
+  out=$(HOME="$home" PATH="$fakebin" "$KIMI_HOOK" install 2>&1) || rc=$?
+  [ "$rc" -ne 0 ] || fail "installer accepted a host with no tomllib interpreter"
+  assert_contains "$out" "no Python 3.11+ interpreter" \
+    "interpreter refusal did not name the concrete missing requirement"
+  assert_absent "$home/.kimi-code/fm-turn-end.sh" "interpreter refusal wrote the hook script"
+  assert_absent "$home/.kimi-code/fm-turn-end.d" "interpreter refusal wrote the registry"
+  pass "Kimi hook discovers a tomllib interpreter past python3 and refuses when none exists"
 }
 
 test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   local id rec out rc hook target token no_token snapshot_before snapshot_after fakebin
+  require_toml_python "Kimi turn-end hook authentication" || return 0
   id=kimi-hook-auth-z6
   rec=$(make_spawn_case hook-auth "$id")
   read_spawn_record "$rec"
@@ -401,6 +501,7 @@ test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
 
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
   local id rec out rc
+  require_toml_python "Kimi unsafe-config spawn refusal" || return 0
   id=kimi-config-refuse-z7
   rec=$(make_spawn_case config-refuse "$id")
   read_spawn_record "$rec"
@@ -417,6 +518,7 @@ test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation() {
 
 test_kimi_teardown_removes_pointer_and_registry_token() {
   local id rec out rc token
+  require_toml_python "Kimi teardown token cleanup" || return 0
   id=kimi-teardown-z8
   rec=$(make_spawn_case teardown "$id")
   read_spawn_record "$rec"
@@ -438,6 +540,7 @@ test_kimi_teardown_removes_pointer_and_registry_token() {
 
 test_kimi_falls_back_to_expanded_home_binary() {
   local id rec out rc launch fallback
+  require_toml_python "Kimi HOME binary fallback" || return 0
   id=kimi-fallback-z4
   rec=$(make_spawn_case fallback "$id")
   read_spawn_record "$rec"
@@ -474,6 +577,7 @@ test_kimi_missing_binary_refuses_before_pane_creation() {
 
 test_kimi_unconfirmed_delivery_fails_loudly() {
   local id rec out rc
+  require_toml_python "Kimi unconfirmed delivery" || return 0
   id=kimi-drop-z2
   rec=$(make_spawn_case drop "$id")
   read_spawn_record "$rec"
@@ -490,6 +594,7 @@ test_kimi_unconfirmed_delivery_fails_loudly() {
 
 test_kimi_readiness_gate_precedes_pointer() {
   local id rec out rc
+  require_toml_python "Kimi readiness gate" || return 0
   id=kimi-not-ready-z3
   rec=$(make_spawn_case not-ready "$id")
   read_spawn_record "$rec"
@@ -661,6 +766,8 @@ test_kimi_hook_install_is_surgical_idempotent_and_removable
 test_kimi_hook_remove_preserves_owned_newline_boundary
 test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
+test_kimi_hook_help_covers_every_verb_and_stops_at_the_header
+test_kimi_hook_discovers_an_interpreter_beyond_python3
 test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
