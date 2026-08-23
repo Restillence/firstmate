@@ -13,12 +13,12 @@
 # token in $HOME/.kimi-code/fm-turn-end.d/.
 #
 # Validation needs tomllib, which ships with Python 3.11 and newer. The
-# interpreter is discovered, not assumed: FM_KIMI_PYTHON when set, then python3
-# on PATH, then python3.14 down to python3.11 on PATH and in $HOME/.local/bin,
-# and the first candidate that can really import tomllib wins. So a host whose
-# default python3 is older still works when a newer one is installed. Discovery
-# is best effort by design - a host with no such interpreter is refused, never
-# silently degraded.
+# interpreter is discovered, not assumed: FM_KIMI_PYTHON when set, then python3,
+# then python3.14 down to python3.11, each looked up both on PATH and in
+# $HOME/.local/bin, and the first candidate that can really import tomllib wins.
+# So a host whose default python3 is older still works when a newer one is
+# installed. Discovery is best effort by design - a host with no such
+# interpreter is refused, never silently degraded.
 #
 # Usage:
 #   fm-kimi-turnend-hook.sh install
@@ -59,7 +59,7 @@ discover_toml_python() {
   local candidate resolved
   for candidate in \
     ${FM_KIMI_PYTHON:+"$FM_KIMI_PYTHON"} \
-    python3 \
+    python3 "$HOME/.local/bin/python3" \
     python3.14 "$HOME/.local/bin/python3.14" \
     python3.13 "$HOME/.local/bin/python3.13" \
     python3.12 "$HOME/.local/bin/python3.12" \

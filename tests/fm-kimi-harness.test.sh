@@ -453,6 +453,42 @@ SH
   pass "Kimi hook discovers a tomllib interpreter past python3 and refuses when none exists"
 }
 
+test_kimi_hook_discovers_a_generic_local_bin_python3() {
+  local home config fakebin out rc
+  require_toml_python "Kimi hook local-bin python3 discovery" || return 0
+  home="$TMP_ROOT/config-discovery-generic"
+  config="$home/.kimi-code/config.toml"
+  fakebin=$(fm_fakebin "$home/only-old-python3")
+  mkdir -p "$home/.kimi-code" "$home/.local/bin"
+  printf '# Captain config\nmodel = "test"\n' > "$config"
+  ln -s "$(command -v bash)" "$fakebin/bash"
+  ln -s "$JQ_BIN" "$fakebin/jq"
+  cat > "$fakebin/python3" <<'SH'
+#!/usr/bin/env bash
+printf 'python3 stub: no tomllib, this interpreter must not be selected\n' >&2
+exit 1
+SH
+  chmod +x "$fakebin/python3"
+
+  # The local-bin interpreter carries the GENERIC name, so it is only reachable
+  # if bare python3 is looked up in $HOME/.local/bin too and not on PATH alone.
+  # No versioned name exists here, so nothing else in the list can rescue it.
+  ln -s "$TOML_PYTHON" "$home/.local/bin/python3"
+  rc=0
+  out=$(HOME="$home" PATH="$fakebin" "$KIMI_HOOK" check 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "installer found no interpreter despite a generic one in the local bin: $out"
+  [ "$out" = "$home/.local/bin/python3" ] \
+    || fail "installer did not report the generic local-bin python3 it should have discovered: $out"
+  rc=0
+  out=$(HOME="$home" PATH="$fakebin" "$KIMI_HOOK" install 2>&1) || rc=$?
+  [ "$rc" -eq 0 ] || fail "installer refused despite a generic local-bin interpreter: $out"
+  assert_grep '# BEGIN FIRSTMATE KIMI TURN-END HOOK' "$config" \
+    "generic local-bin interpreter did not install the Firstmate region"
+  HOME="$home" PATH="$fakebin" "$KIMI_HOOK" remove \
+    || fail "installer could not remove through the generic local-bin interpreter"
+  pass "Kimi hook discovers a generic python3 in the user-local bin"
+}
+
 test_kimi_hook_is_silent_and_requires_registered_workspace_token() {
   local id rec out rc hook target token no_token snapshot_before snapshot_after fakebin
   require_toml_python "Kimi turn-end hook authentication" || return 0
@@ -768,6 +804,7 @@ test_kimi_hook_fails_closed_on_missing_malformed_or_partial_config
 test_kimi_hook_install_refuses_without_jq
 test_kimi_hook_help_covers_every_verb_and_stops_at_the_header
 test_kimi_hook_discovers_an_interpreter_beyond_python3
+test_kimi_hook_discovers_a_generic_local_bin_python3
 test_kimi_launch_then_send_is_verified
 test_kimi_hook_is_silent_and_requires_registered_workspace_token
 test_kimi_spawn_refuses_unsafe_global_config_before_pane_creation
