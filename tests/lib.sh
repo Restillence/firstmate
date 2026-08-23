@@ -182,14 +182,20 @@ SH
 # The mirror source is the same FM_TEST_BASE_PATH the call sites read, because a
 # host that needs that override (NixOS, where /usr/bin holds only env and /bin
 # only sh) would otherwise get a near-empty farm with no bash, git, sed or grep.
+# A name carried by more than one of those directories resolves to the EARLIEST
+# one, exactly as PATH resolves it: the farm is linked back to front so the
+# highest-priority directory takes the final overwrite. Anything else would hand
+# a fixture a different binary than every fixture that reads the base path
+# directly, which is how an override gets silently defeated.
 fm_test_system_path_without() {
-  local dir=$1 source_dir tool
+  local dir=$1 source_dir tool i
   local entries=()
   local source_dirs=()
   shift
   mkdir -p "$dir" || return 1
   IFS=: read -r -a source_dirs <<< "${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
-  for source_dir in "${source_dirs[@]}"; do
+  for (( i = ${#source_dirs[@]} - 1; i >= 0; i-- )); do
+    source_dir=${source_dirs[i]}
     [ -n "$source_dir" ] || continue
     [ -d "$source_dir" ] || continue
     entries=("$source_dir"/*)
