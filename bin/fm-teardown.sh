@@ -854,6 +854,32 @@ pr_is_merged() {
   unpushed_patches_are_in_pr_head "$head"
 }
 
+# Print the tree that results from three-way merging <ref> with HEAD, without
+# touching the worktree or its index. `git merge-tree --write-tree` is the direct
+# form, but it only exists from Git 2.38 and older Git rejects the flag as an
+# unknown revision - which retired the whole content check below rather than
+# answering it, so every squash-landed worktree false-refused teardown on those
+# hosts. The fallback runs the same merge through a scratch index: an
+# unresolvable path stays unmerged there and write-tree refuses, so both forms
+# report a conflict as inconclusive exactly as the caller requires.
+# Returns non-zero when the merge cannot be completed.
+merged_tree_with_head() {  # <ref>
+  local ref=$1 base scratch index tree
+  if tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null); then
+    printf '%s\n' "$tree" | head -1
+    return 0
+  fi
+  base=$(git -C "$WT" merge-base "$ref" HEAD 2>/dev/null) || return 1
+  [ -n "$base" ] || return 1
+  scratch=$(mktemp -d "${TMPDIR:-/tmp}/fm-teardown-merge.XXXXXX") || return 1
+  index="$scratch/index"
+  tree=$(GIT_INDEX_FILE="$index" git -C "$WT" read-tree -m --aggressive "$base" "$ref" HEAD 2>/dev/null &&
+    GIT_INDEX_FILE="$index" git -C "$WT" write-tree 2>/dev/null) || tree=
+  rm -rf -- "$scratch"
+  [ -n "$tree" ] || return 1
+  printf '%s\n' "$tree" | head -1
+}
+
 # Is the branch's content already present in the up-to-date default branch? Fetches
 # first, then 3-way merges the default branch with HEAD: when HEAD introduces nothing
 # the default branch does not already contain (e.g. its change landed via squash) the
@@ -874,8 +900,7 @@ content_in_default() {
   fi
   default_tree=$(git -C "$WT" rev-parse --quiet --verify "$ref^{tree}" 2>/dev/null) || return 1
   [ -n "$default_tree" ] || return 1
-  merged_tree=$(git -C "$WT" merge-tree --write-tree "$ref" HEAD 2>/dev/null) || return 1
-  merged_tree=$(printf '%s\n' "$merged_tree" | head -1)
+  merged_tree=$(merged_tree_with_head "$ref") || return 1
   [ "$merged_tree" = "$default_tree" ]
 }
 

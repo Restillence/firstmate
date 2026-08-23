@@ -15,10 +15,12 @@
 # and fetch failures.
 # Pruning never deletes the checked-out branch or a branch that still has a
 # worktree, so it cannot discard unlanded work; set FM_FLEET_PRUNE=0 to disable it.
-# When the fetch fails on an orphaned .git/packed-refs.lock (left by a ref rewrite
-# killed mid-write - e.g. a timed-out bootstrap sync or a teardown process kill),
-# it is retried with a bounded wait and removed only when provably stale; see
-# fetch_with_packed_refs_lock_guard and the FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs.
+# When the fetch is blocked by an orphaned .git/packed-refs.lock (left by a ref
+# rewrite killed mid-write - e.g. a timed-out bootstrap sync or a teardown
+# process kill), it is retried with a bounded wait and removed only when provably
+# stale; see prune_fetch_once, fetch_with_packed_refs_lock_guard, and the
+# FM_FLEET_SYNC_PACKED_REFS_LOCK_* knobs. That block is recognized from Git's own
+# message rather than its exit status, because Git before 2.38 exits 0 on it.
 # Usage: fm-fleet-sync.sh [<project-dir-or-name>]
 # The single-project form accepts either a path (absolute, or relative to the
 # caller's cwd) or a bare "<name>"/"projects/<name>" form, resolved against
@@ -151,10 +153,31 @@ packed_refs_lock_path() {
   esac
 }
 
-# Run `git -C "$PROJ" fetch origin --prune --quiet`, tolerating an orphaned
-# packed-refs.lock left by a killed ref rewrite. Sets FETCH_OUTPUT to the git
-# command's combined output and returns its exit status. On the packed-refs.lock
-# signature ONLY: retry up to FLEET_SYNC_PACKED_REFS_LOCK_RETRIES times (a
+# One `git -C "$PROJ" fetch origin --prune --quiet`, normalized so a prune the
+# lock blocked counts as a failure on every Git. Git before 2.38 reports
+# "could not delete reference ...: Unable to create '...packed-refs.lock'" on
+# stderr and STILL exits 0, so on those hosts the one condition this guard
+# exists to recover from arrived as a silent success: the lock survived, the
+# prune never happened, and every later sync repeated that forever while
+# reporting the clone synced. Deciding on the signature rather than the status
+# keeps the guard reachable regardless of Git version.
+# Sets FETCH_OUTPUT; returns 0 only when the fetch both succeeded and pruned.
+prune_fetch_once() {
+  local rc
+  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+  if [ "$rc" -ne 0 ]; then
+    return "$rc"
+  fi
+  if is_packed_refs_lock_error "$FETCH_OUTPUT"; then
+    return 1
+  fi
+  return 0
+}
+
+# Run prune_fetch_once, tolerating an orphaned packed-refs.lock left by a killed
+# ref rewrite. Sets FETCH_OUTPUT to the git command's combined output and returns
+# its exit status. On the packed-refs.lock signature ONLY: retry up to
+# FLEET_SYNC_PACKED_REFS_LOCK_RETRIES times (a
 # transient lock self-clears as the owning process exits), then - only if the lock
 # is provably stale per fm-lock-lib.sh (still present, mtime age past the
 # threshold, no lsof holder of the lock or the clone worktree $PROJ) - remove it
@@ -164,7 +187,7 @@ packed_refs_lock_path() {
 # a session-start refresh (which discards fleet-sync stderr) still surfaces it.
 fetch_with_packed_refs_lock_guard() {
   local rc attempt=0 lock lock_desc
-  FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+  prune_fetch_once; rc=$?
   [ "$rc" -eq 0 ] && return 0
   is_packed_refs_lock_error "$FETCH_OUTPUT" || return "$rc"
 
@@ -174,7 +197,7 @@ fetch_with_packed_refs_lock_guard() {
     attempt=$(( attempt + 1 ))
     echo "$label: fetch blocked by packed-refs lock ($lock_desc); waiting ${FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS}s and retrying ($attempt/${FLEET_SYNC_PACKED_REFS_LOCK_RETRIES}) (owning process may be exiting)" >&2
     sleep "$FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS"
-    FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+    prune_fetch_once; rc=$?
     if [ "$rc" -eq 0 ]; then
       echo "$label: fetch succeeded on retry; packed-refs lock cleared on its own" >&2
       # One stdout summary so a session-start refresh (which discards fleet-sync
@@ -198,7 +221,7 @@ fetch_with_packed_refs_lock_guard() {
         return "$rc"
       fi
       echo "$label: removed provably-stale packed-refs lock $lock (age >= ${FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS}s, no live holder) and retrying fetch" >&2
-      FETCH_OUTPUT=$(git -C "$PROJ" fetch origin --prune --quiet 2>&1); rc=$?
+      prune_fetch_once; rc=$?
       if [ "$rc" -eq 0 ]; then
         echo "$label: fetch succeeded after stale packed-refs lock cleanup" >&2
         echo "$label: recovered: removed a stale packed-refs lock (no live holder)"

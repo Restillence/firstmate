@@ -170,6 +170,34 @@ SH
   done
 }
 
+# fm_test_system_path_without <dir> <tool>...
+# Echoes a PATH made of the standard system directories with the named tools
+# deliberately absent.
+# A fixture that has to present a host WITHOUT some tool cannot get there by
+# deleting its own stub: PATH lookup simply falls through to whatever the runner
+# installs in /usr/bin, so the identical fixture is a real test on a host that
+# lacks the tool and vacuous on a host that ships it. This mirrors the system
+# directories into <dir> as a symlink farm and leaves the named tools out of the
+# mirror, so the absence holds on every host.
+fm_test_system_path_without() {
+  local dir=$1 source_dir tool
+  local entries=()
+  shift
+  mkdir -p "$dir" || return 1
+  for source_dir in /usr/bin /bin /usr/sbin /sbin; do
+    [ -d "$source_dir" ] || continue
+    entries=("$source_dir"/*)
+    # An unmatched glob stays literal; a dangling symlink is still a real entry,
+    # so test for expansion rather than for the first entry resolving.
+    [ "${entries[0]}" != "$source_dir/*" ] || continue
+    ln -sf "${entries[@]}" "$dir/" || return 1
+  done
+  for tool in "$@"; do
+    rm -f "$dir/$tool" || return 1
+  done
+  printf '%s\n' "$dir"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation

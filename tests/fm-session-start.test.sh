@@ -402,7 +402,13 @@ SH
 }
 
 make_fake_herdr_secondmate_recovery() {
-  local fakebin=$1
+  local fakebin=$1 jq_bin
+  # The Herdr adapter reads every response body through jq, and this fixture
+  # pins PATH to the system directories, so a host that installs jq outside
+  # them (a Nix profile, Homebrew) would make each read unparseable and turn a
+  # healthy recovery into an "endpoint probe unreadable" false failure. Expose
+  # the host's own jq explicitly rather than depending on where it lives.
+  jq_bin=$(command -v jq 2>/dev/null) && ln -sf "$jq_bin" "$fakebin/jq"
   # The recovery kill now requires the shared named-session lock and an exact
   # focus snapshot. Keep a focused sibling tab so this test's husk close is
   # provably non-workspace-emptying and never needs to signal a fake shell pid.
@@ -915,7 +921,7 @@ SH
 # still leads, live fleet identity now outranks curated memory, and the
 # read-once contract arrives before the payload it governs.
 test_output_ordering_diagnostics_lead() {
-  local rec root home fakebin out lock_line boot_line wake_line read_once_line
+  local rec root home fakebin node_free_path out lock_line boot_line wake_line read_once_line
   local context_line fleet_line next_line inventory_line missing_line
   rec=$(new_world ordering)
   IFS='|' read -r root home fakebin <<EOF
@@ -924,12 +930,15 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   # Force a MISSING diagnostic line so the bootstrap section is non-trivial.
+  # Dropping the stub alone leaves a host that ships node in a system directory
+  # resolving it anyway, which would quietly retire this ordering assertion.
   rm -f "$fakebin/node"
+  node_free_path=$(fm_test_system_path_without "$home/path-without-node" node)
 
   printf 'window=fm-sess:w1\nkind=ship\n' > "$home/state/task-a.meta"
   printf 'Captain memory that may be truncated away safely.\n' > "$home/data/captain.md"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$node_free_path")
 
   lock_line=$(printf '%s\n' "$out" | grep -n '^LOCK$' | head -1 | cut -d: -f1)
   boot_line=$(printf '%s\n' "$out" | grep -n '^BOOTSTRAP$' | head -1 | cut -d: -f1)
@@ -1333,7 +1342,7 @@ EOF
 # --- composition: real scripts run, not reimplemented ------------------------
 
 test_composition_invokes_real_scripts() {
-  local rec root home fakebin out
+  local rec root home fakebin node_free_path out
   rec=$(new_world composition)
   IFS='|' read -r root home fakebin <<EOF
 $rec
@@ -1341,11 +1350,12 @@ EOF
   make_fake_toolchain "$fakebin"
   make_fake_ps_claude "$fakebin"
   rm -f "$fakebin/node"
+  node_free_path=$(fm_test_system_path_without "$home/path-without-node" node)
 
   printf 'needs-decision: pick a library\n' > "$home/state/task-z.status"
   append_wake "$home/state" signal task-z.status "needs-decision: pick a library"
 
-  out=$(run_session_start "$home" "$root" "$fakebin:$BASE_PATH")
+  out=$(run_session_start "$home" "$root" "$fakebin:$node_free_path")
 
   # fm-lock.sh's own exact success text.
   assert_contains "$out" "lock acquired: harness pid" "fm-lock.sh's real output did not appear (composition, not reimplementation)"

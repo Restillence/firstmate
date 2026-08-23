@@ -38,6 +38,8 @@
 #   (o) fm-pr-check rerun after HEAD moved                      -> no stale pr_head
 #   (p) fm-pr-check when local HEAD lags                        -> record remote PR head
 #   (q) no-mistakes + NO pr= recorded, PR discovered by branch  -> ALLOW  (yolo/no-CI merge)
+#   (q1) content already in default, no merge-tree --write-tree -> ALLOW  (portable merge)
+#   (q2) content NOT in default, no merge-tree --write-tree     -> REFUSE (portable merge)
 #
 # Also covers backlog teardown-lock-race: a git index.lock left in the worktree by a
 # killed crew process (bin/fm-teardown.sh's teardown_treehouse_return).
@@ -904,6 +906,66 @@ test_content_fallback_refreshes_stale_origin_ref() {
   expect_code 0 "$rc" "content-stale-ref: teardown should use the freshly fetched default branch"
   ! grep -q REFUSED "$case_dir/stderr" || fail "content-stale-ref: teardown printed a REFUSED line"
   pass "content fallback refreshes origin default before comparing trees"
+}
+
+# `git merge-tree --write-tree` is the direct form of the content check but only
+# exists from Git 2.38, and older Git rejects the flag outright. That made the
+# whole content fallback silently unavailable on those hosts - every
+# squash-landed worktree false-refused - so the answer has to survive losing
+# that one command. This shim removes exactly it and nothing else, on every Git
+# version, so the portable path is exercised wherever this suite runs.
+without_merge_tree_write_tree() {
+  local case_dir=$1
+  cat > "$case_dir/fakebin/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+for arg in "$@"; do
+  if [ "$arg" = merge-tree ]; then
+    printf "fatal: unknown rev --write-tree\n" >&2
+    exit 128
+  fi
+done
+exec "$real" "$@"
+SH
+  chmod +x "$case_dir/fakebin/git"
+}
+
+test_content_fallback_survives_without_merge_tree_write_tree() {
+  local case_dir rc
+  case_dir=$(make_case content-no-merge-tree)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  land_on_origin_main "$case_dir" feature.txt hello
+  without_merge_tree_write_tree "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 0 "$rc" "content-no-merge-tree: teardown should still recognize landed content"
+  ! grep -q REFUSED "$case_dir/stderr" || fail "content-no-merge-tree: teardown printed a REFUSED line"
+  pass "the content check answers without git merge-tree --write-tree"
+}
+
+test_content_fallback_without_merge_tree_still_refuses_unlanded() {
+  local case_dir rc
+  case_dir=$(make_case content-no-merge-tree-unlanded)
+  write_meta "$case_dir" no-mistakes ship
+  wt_commit_file "$case_dir" feature.txt hello "add feature"
+  # Nothing lands on origin/main, so the portable path must reach the same
+  # refusal the direct one does rather than passing everything through.
+  without_merge_tree_write_tree "$case_dir"
+
+  set +e
+  run_teardown "$case_dir" > "$case_dir/stdout" 2> "$case_dir/stderr"
+  rc=$?
+  set -e
+
+  expect_code 1 "$rc" "content-no-merge-tree-unlanded: teardown should refuse genuinely unlanded work"
+  grep -q REFUSED "$case_dir/stderr" \
+    || fail "content-no-merge-tree-unlanded: no REFUSED line in stderr"
+  pass "the portable content check still refuses work that never landed"
 }
 
 test_dirty_worktree_refuses() {
@@ -2620,6 +2682,8 @@ test_pr_check_does_not_refresh_stale_pr_head
 test_pr_check_records_remote_head_when_local_lags
 test_content_in_default_fallback_allows
 test_content_fallback_refreshes_stale_origin_ref
+test_content_fallback_survives_without_merge_tree_write_tree
+test_content_fallback_without_merge_tree_still_refuses_unlanded
 test_dirty_worktree_refuses
 test_gh_error_and_content_absent_refuses
 test_stale_index_lock_cleared_and_teardown_succeeds

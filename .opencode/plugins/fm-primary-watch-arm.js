@@ -391,18 +391,34 @@ function armAttempt(status, armChild, includeArmChild) {
   return includeArmChild ? { status, armChild } : status;
 }
 
+// Start one arm attempt, or join the attempt already running. `joined` says
+// which happened, because a joined attempt answers a question that was asked
+// before this caller existed.
+async function startOrJoinArm(paths, sessionID, client, predecessorArmPid) {
+  if (launchInFlight) {
+    return { ...(await launchInFlight), joined: true };
+  }
+  const launch = beginArm(paths, sessionID, client, predecessorArmPid);
+  launchInFlight = launch;
+  try {
+    return { ...(await launch), joined: false };
+  } finally {
+    if (launchInFlight === launch) launchInFlight = null;
+  }
+}
+
 async function ensureArm(paths, sessionID, client, predecessorArmPid = "", includeArmChild = false) {
-  let launchResult = null;
-  if (!launchInFlight) {
-    const launch = beginArm(paths, sessionID, client, predecessorArmPid);
-    launchInFlight = launch;
-    try {
-      launchResult = await launch;
-    } finally {
-      if (launchInFlight === launch) launchInFlight = null;
-    }
-  } else {
-    launchResult = await launchInFlight;
+  let launchResult = await startOrJoinArm(paths, sessionID, client, predecessorArmPid);
+  // Coalescing exists to stop concurrent idles launching duplicate arm children,
+  // and an attempt that produced a child is genuinely shared. A joined attempt
+  // that produced NO child is different: it read the lock, the root, and the
+  // fleet records before this request arrived, so its refusal can already be
+  // out of date - a session that acquired the fleet lock a moment ago would
+  // inherit the previous caller's "read-only" and never arm, with nothing left
+  // to retry it until the next idle. Re-evaluate exactly once for this caller
+  // instead of adopting that answer; one retry cannot loop.
+  if (!launchResult.armChild && launchResult.joined) {
+    launchResult = await startOrJoinArm(paths, sessionID, client, predecessorArmPid);
   }
   const armChild = launchResult.armChild;
   if (!armChild) {
