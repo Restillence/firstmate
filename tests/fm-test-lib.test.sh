@@ -118,6 +118,19 @@ pass "a dangling symlink is mirrored as the real entry it is"
 
 # --- fm_test_system_path_without: the default base path ----------------------
 
+# Lists a mirror's entries one basename per line. A glob loop rather than `ls`,
+# so the listing never depends on parsing ls output, and screened for the
+# unmatched glob exactly as the helper itself is, so an empty mirror lists
+# nothing rather than a literal asterisk.
+mirror_entries() {
+  local dir=$1 entry
+  local entries=("$dir"/*)
+  [ "${entries[0]}" != "$dir/*" ] || return 0
+  for entry in "${entries[@]}"; do
+    printf '%s\n' "${entry##*/}"
+  done
+}
+
 # With no override the helper must still mirror the documented default, which is
 # the same string its call sites default to. Comparing the two mirrors pins that
 # without assuming any particular host layout, since the host that needs the
@@ -128,8 +141,8 @@ default_mirror=$(unset FM_TEST_BASE_PATH
 explicit_mirror=$(FM_TEST_BASE_PATH=/usr/bin:/bin:/usr/sbin:/sbin \
   fm_test_system_path_without "$TMP_ROOT/mirror-default-explicit" env) \
   || fail "fm_test_system_path_without failed with the default base path spelled out"
-ls -A "$default_mirror" | LC_ALL=C sort > "$TMP_ROOT/default.list"
-ls -A "$explicit_mirror" | LC_ALL=C sort > "$TMP_ROOT/explicit.list"
+mirror_entries "$default_mirror" | LC_ALL=C sort > "$TMP_ROOT/default.list"
+mirror_entries "$explicit_mirror" | LC_ALL=C sort > "$TMP_ROOT/explicit.list"
 [ -s "$TMP_ROOT/default.list" ] || fail "the default mirror is empty"
 cmp -s "$TMP_ROOT/default.list" "$TMP_ROOT/explicit.list" \
   || fail "no override does not mirror the same directories as the documented default base path"
