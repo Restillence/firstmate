@@ -12,19 +12,28 @@
 # touches a task turn-end marker only when the pointer names a Firstmate-created
 # token in $HOME/.kimi-code/fm-turn-end.d/.
 #
+# Validation needs tomllib, which ships with Python 3.11 and newer. The
+# interpreter is discovered, not assumed: FM_KIMI_PYTHON when set, then python3,
+# then python3.14 down to python3.11, each looked up both on PATH and in
+# $HOME/.local/bin, and the first candidate that can really import tomllib wins.
+# So a host whose default python3 is older still works when a newer one is
+# installed. Discovery is best effort by design - a host with no such
+# interpreter is refused, never silently degraded.
+#
 # Usage:
 #   fm-kimi-turnend-hook.sh install
 #   fm-kimi-turnend-hook.sh remove
+#   fm-kimi-turnend-hook.sh check    print the interpreter that would be used
 set -u
 
 case "${1:-}" in
-  install|remove) ACTION=$1 ;;
+  install|remove|check) ACTION=$1 ;;
   -h|--help)
-    sed -n '2,18{s/^# \{0,1\}//;p;}' "$0"
+    sed -n '2,26{s/^# \{0,1\}//;p;}' "$0"
     exit 0
     ;;
   *)
-    printf 'usage: %s install|remove\n' "${0##*/}" >&2
+    printf 'usage: %s install|remove|check\n' "${0##*/}" >&2
     exit 2
     ;;
 esac
@@ -33,16 +42,56 @@ if [ -z "${HOME:-}" ]; then
   printf 'fm-kimi-turnend-hook: refused: HOME is unset.\n' >&2
   exit 1
 fi
-if ! command -v python3 >/dev/null 2>&1; then
-  printf 'fm-kimi-turnend-hook: refused: python3 with tomllib is required to validate config.toml.\n' >&2
-  exit 1
-fi
+# Checked before interpreter discovery so a host missing jq gets the concrete
+# tool it lacks named, whatever its interpreter situation happens to be.
 if [ "$ACTION" = install ] && ! command -v jq >/dev/null 2>&1; then
   printf 'fm-kimi-turnend-hook: refused: jq is required by the installed Kimi turn-end hook.\n' >&2
   exit 1
 fi
 
-python3 - "$ACTION" "$HOME/.kimi-code" <<'PY'
+# Echo the first candidate that can really import tomllib, in the order the
+# header states. Candidates are probed by execution rather than by parsing a
+# version string, so this verdict is the same question the validator below asks.
+# $HOME/.local/bin is consulted alongside PATH because interpreters installed
+# outside the system package manager (pip --user, pipx, uv) land there without
+# always being on it.
+discover_toml_python() {
+  local candidate resolved
+  for candidate in \
+    ${FM_KIMI_PYTHON:+"$FM_KIMI_PYTHON"} \
+    python3 "$HOME/.local/bin/python3" \
+    python3.14 "$HOME/.local/bin/python3.14" \
+    python3.13 "$HOME/.local/bin/python3.13" \
+    python3.12 "$HOME/.local/bin/python3.12" \
+    python3.11 "$HOME/.local/bin/python3.11"; do
+    case "$candidate" in
+      */*)
+        [ -x "$candidate" ] || continue
+        resolved=$candidate
+        ;;
+      *)
+        resolved=$(command -v "$candidate" 2>/dev/null) || continue
+        ;;
+    esac
+    "$resolved" -c 'import tomllib' >/dev/null 2>&1 || continue
+    printf '%s\n' "$resolved"
+    return 0
+  done
+  return 1
+}
+
+PYTHON_BIN=$(discover_toml_python) || {
+  printf 'fm-kimi-turnend-hook: refused: no Python 3.11+ interpreter with tomllib was found; tried python3 and python3.11 through python3.14 on PATH and in %s/.local/bin. Install one, or set FM_KIMI_PYTHON to the path of one.\n' \
+    "$HOME" >&2
+  exit 1
+}
+
+if [ "$ACTION" = check ]; then
+  printf '%s\n' "$PYTHON_BIN"
+  exit 0
+fi
+
+"$PYTHON_BIN" - "$ACTION" "$HOME/.kimi-code" <<'PY'
 import os
 import re
 import shutil
@@ -53,8 +102,11 @@ import tempfile
 try:
     import tomllib
 except ImportError:
+    # Unreachable in practice: the caller already proved this interpreter can
+    # import tomllib. Kept so a surprising interpreter refuses instead of
+    # falling through to a config write it cannot validate.
     print(
-        "fm-kimi-turnend-hook: refused: python3 with tomllib is required to validate config.toml.",
+        "fm-kimi-turnend-hook: refused: the selected interpreter cannot import tomllib.",
         file=sys.stderr,
     )
     raise SystemExit(1)
