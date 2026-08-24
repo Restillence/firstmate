@@ -105,6 +105,17 @@ EOF
 }
 write_registry
 
+# Every call here stages a job and waits for the worker to publish its result.
+# That wait is bounded at queue timeout + execution timeout + grace, which
+# defaults to 750s PER CALL: a worker that never claims its job turns this file
+# into a run that looks wedged for hours rather than one that fails. These
+# fixture bounds keep the identical failure - the real "did not complete within
+# its bounded wait" diagnostic - while making it arrive in about a minute, and
+# they stay far above the sub-second time a healthy staged job actually takes.
+export FM_REMOTE_JOB_QUEUE_TIMEOUT=30
+export FM_REMOTE_JOB_TIMEOUT=30
+export FM_REMOTE_JOB_WAIT_GRACE=5
+
 fm_on() {
   FM_HOME="$LOCAL_HOME" \
   FM_ROOT_OVERRIDE="$REMOTE_ROOT" \
@@ -201,10 +212,19 @@ MANAGER_DIRS=(
   "$ACCOUNT_HOME"/.local/share/mise/installs/*/*/bin
   "$ACCOUNT_HOME"/.mise/installs/*/*/bin
 )
-OPTIONAL_DIRS=(
+# docs/remote-secondmates.md "Non-interactive tool contract": for the three Nix
+# locations a final `bin` symlink is RESOLVED to its physical directory, while
+# every other optional directory keeps the plain include-unless-a-symlink rule.
+# Rebuilding only the plain rule made this assertion agree with the composer on
+# any host with no Nix profile and disagree with it on every host that has one,
+# so the resolve branch went untested where it exists and false-failed where it
+# fires.
+NIX_DIRS=(
   "$ACCOUNT_HOME/.nix-profile/bin"
   "/etc/profiles/per-user/$ACCOUNT_USER/bin"
   /run/current-system/sw/bin
+)
+OPTIONAL_DIRS=(
   /opt/homebrew/bin
   /usr/local/bin
 )
@@ -212,6 +232,20 @@ EXPECTED_PATH=
 expect_dir() {
   case ":$EXPECTED_PATH:" in *":$1:"*) return 0 ;; esac
   EXPECTED_PATH="${EXPECTED_PATH:+$EXPECTED_PATH:}$1"
+}
+# The Nix rule, stated once: an existing plain directory goes in as itself, an
+# existing final-component symlink goes in as its physical target, and anything
+# whose target is missing or itself a symlink is omitted.
+expect_resolved_dir() {
+  local candidate=$1 physical
+  [ -d "$candidate" ] || return 0
+  if [ ! -L "$candidate" ]; then
+    expect_dir "$candidate"
+    return 0
+  fi
+  physical=$(CDPATH='' cd -- "$candidate" 2>/dev/null && pwd -P) || return 0
+  [ -d "$physical" ] && [ ! -L "$physical" ] || return 0
+  expect_dir "$physical"
 }
 path_has() { case ":$1:" in *":$2:"*) return 0 ;; esac; return 1; }
 CHILD_PATH=$(fm_on ios fm-probe-path.sh)
@@ -228,6 +262,7 @@ for candidate in "${NVM_CHILD_DIRS[@]}"; do expect_dir "$candidate"; done
 for candidate in "${MANAGER_DIRS[@]}"; do
   [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
 done
+for candidate in "${NIX_DIRS[@]}"; do expect_resolved_dir "$candidate"; done
 for candidate in "${OPTIONAL_DIRS[@]}"; do
   [ -d "$candidate" ] && [ ! -L "$candidate" ] && expect_dir "$candidate"
 done
@@ -300,6 +335,20 @@ DOCTOR_BIN="$TMP_ROOT/doctor-bin"
 DOCTOR_HOME="$TMP_ROOT/doctor-home"
 mkdir -p "$DOCTOR_BIN" "$DOCTOR_HOME"
 ln -sf "$(command -v bash)" "$DOCTOR_BIN/bash"
+# git and jq must RESOLVE here so the missing-tool list below names exactly the
+# tools this case withholds. The account home is empty and the rest of the PATH
+# is the system directories, so a host that keeps either one elsewhere (a Nix
+# profile, Homebrew) would otherwise add it to that list and fail on host layout
+# rather than on the diagnostic under test. These are forwarding shims and not
+# symlinks on purpose: a later case replaces $DOCTOR_BIN/jq with a stub by
+# writing the file, and a symlink there would send that write to the host's own
+# installed tool.
+for tool in git jq; do
+  tool_path=$(command -v "$tool") \
+    || fail "this case needs $tool on the host PATH to forward to, and it does not resolve"
+  printf '#!/usr/bin/env bash\nexec %s "$@"\n' "$tool_path" > "$DOCTOR_BIN/$tool"
+  chmod +x "$DOCTOR_BIN/$tool"
+done
 # Report a non-darwin host so this file keeps testing tool resolution alone and
 # never reads or writes the real account's launch agents.
 cat > "$DOCTOR_BIN/uname" <<'SH'

@@ -567,6 +567,16 @@ mkdir -p "$CASE_HOME/.local/bin"
 for tool in herdr tasks-axi treehouse claude; do
   ln -s "$CASE_BIN/$tool" "$CASE_HOME/.local/bin/$tool"
 done
+# This case is the only one whose required-tool report comes back through the
+# worker, and the worker composes its own PATH from the FIXTURE account home
+# plus the system directories - never the runner's own PATH. A host that keeps
+# git or jq outside the system directories (a Nix profile, Homebrew) would
+# therefore report them missing and fail this case on host layout rather than
+# on the stale-identity behavior under test, so re-expose them where the
+# fixture account can see them.
+for tool in git jq; do
+  ln -s "$TOOLS/$tool" "$CASE_HOME/.local/bin/$tool"
+done
 HOME="$CASE_HOME" FM_ROOT_OVERRIDE="$ROOT" FM_REMOTE_JOB_PLATFORM_OVERRIDE=Linux \
   "$ROOT/bin/fm-remote-job-worker.sh" > "$CASE_STATE/worker.out" 2> "$CASE_STATE/worker.err" &
 DOCTOR_WORKER_PID=$!

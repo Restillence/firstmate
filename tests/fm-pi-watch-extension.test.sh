@@ -1322,10 +1322,19 @@ const hooks = await mod.FmPrimaryWatchArm({
   directory: process.env.WORKTREE,
   worktree: process.env.WORKTREE,
 });
+const coordinator = globalThis.__firstmateOpenCodeWatchArm;
 const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
 await hooks.event(event);
-await new Promise((resolve) => setTimeout(resolve, 120));
+// The hook starts its attempt without awaiting it, so join that attempt through
+// the coordinator instead of sleeping a guessed interval. A fixed wait turns
+// this refusal check into a vacuous pass on a loaded host, where the attempt has
+// not reached its verdict yet when the check runs.
+const foreignLockStatus = await coordinator.ensureArmed("session-test", client);
+if (foreignLockStatus !== "read-only") {
+  console.error(`foreign session lock did not refuse the arm: ${foreignLockStatus}`);
+  process.exit(1);
+}
 if (existsSync(process.env.FM_ARM_LOG)) {
   console.error("watch arm ran without owning the session lock");
   process.exit(1);
@@ -1345,6 +1354,80 @@ EOF
   expect_code 0 "$status" "OpenCode watch plugin must arm only when this session owns the fleet lock"
   [ -z "$out" ] || fail "OpenCode session-lock test printed output: $out"
   pass "OpenCode watcher plugin requires session lock ownership"
+}
+
+# Two idle events can overlap, and the second one's preconditions are its own.
+# The plugin coalesces a concurrent request onto the attempt already running, so
+# a session that acquired the fleet lock between the two used to inherit the
+# first attempt's "read-only" refusal and never arm - nothing retries a refusal,
+# so supervision simply stopped for that turn. This drives the overlap on
+# purpose rather than waiting for a loaded host to produce it by accident.
+test_opencode_overlapping_idle_rechecks_the_session_lock() {
+  local plugin repo home log fakebin out status
+  plugin="$ROOT/.opencode/plugins/fm-primary-watch-arm.js"
+  repo="$TMP_ROOT/opencode-overlap-root"
+  home="$TMP_ROOT/opencode-overlap-home"
+  log="$TMP_ROOT/opencode-overlap.log"
+  fakebin="$TMP_ROOT/opencode-overlap-bin"
+  mkdir -p "$repo/bin" "$home/state" "$home/config" "$fakebin"
+  git init -q "$repo"
+  : > "$repo/AGENTS.md"
+  : > "$home/state/task.meta"
+  cat > "$repo/bin/fm-watch-arm.sh" <<'SH'
+#!/usr/bin/env bash
+printf 'arm\n' >> "${FM_ARM_LOG:?}"
+printf 'watcher: healthy pid=1 (beacon 0s)\n'
+SH
+  chmod +x "$repo/bin/fm-watch-arm.sh"
+  # Hold the first attempt open at a known point. Ownership is decided by reading
+  # the lock file and then walking the process ancestry with ps, so a slow ps
+  # parks that attempt AFTER it has read the foreign lock and BEFORE it answers -
+  # exactly the window the second idle has to arrive in. Without this the two
+  # events simply do not overlap and the case proves nothing. The session that
+  # owns the lock matches on the pid itself and never reaches ps, so only the
+  # first attempt is slowed.
+  cat > "$fakebin/ps" <<SH
+#!/usr/bin/env bash
+sleep 0.3
+exec $(command -v ps) "\$@"
+SH
+  chmod +x "$fakebin/ps"
+  out=$(PATH="$fakebin:$PATH" PLUGIN="$plugin" WORKTREE="$repo" FM_HOME="$home" FM_ARM_LOG="$log" node 2>&1 <<'EOF'
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
+
+const mod = await import(pathToFileURL(process.env.PLUGIN).href);
+const client = { session: { promptAsync: async () => {} } };
+const hooks = await mod.FmPrimaryWatchArm({
+  client,
+  directory: process.env.WORKTREE,
+  worktree: process.env.WORKTREE,
+});
+const event = { event: { type: "session.idle", properties: { sessionID: "session-test" } } };
+
+// First idle: this session does not hold the lock, and its attempt is parked
+// inside the ownership walk when the lock changes hands and the second idle
+// arrives. The wait is long enough for that attempt to have read the foreign
+// lock and short enough that it has not finished the walk.
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, "999999\n");
+await hooks.event(event);
+await new Promise((resolve) => setTimeout(resolve, 400));
+writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
+await hooks.event(event);
+
+for (let i = 0; i < 500 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+  await new Promise((resolve) => setTimeout(resolve, 20));
+}
+if (!existsSync(process.env.FM_ARM_LOG)) {
+  console.error("the overlapping idle inherited a stale refusal and never armed");
+  process.exit(1);
+}
+EOF
+)
+  status=$?
+  expect_code 0 "$status" "an overlapping idle must recheck lock ownership instead of inheriting a stale refusal"
+  [ -z "$out" ] || fail "OpenCode overlapping-idle test printed output: $out"
+  pass "OpenCode overlapping idle events recheck session-lock ownership"
 }
 
 test_opencode_watch_arm_coordinator_respects_primary_scope() {
@@ -2143,6 +2226,7 @@ test_opencode_plugin_package_boundary_is_explicit_esm
 test_opencode_primary_watch_plugin_uses_effective_state_home
 test_opencode_primary_watch_plugin_sources_effective_config
 test_opencode_primary_watch_plugin_requires_session_lock
+test_opencode_overlapping_idle_rechecks_the_session_lock
 test_opencode_watch_arm_coordinator_respects_primary_scope
 test_opencode_primary_watch_plugin_rearms_after_wake
 test_opencode_pre_ready_actionable_close_preserves_its_successor

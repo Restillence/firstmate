@@ -21,6 +21,10 @@
 # worktree dir as its cwd also blocks removal (the clone-dir liveness check); a
 # transient lock that self-clears is retried without a force-remove; and any
 # non-packed-refs.lock fetch failure keeps today's behavior with no retry.
+# The block is recognized from Git's own message rather than its exit status,
+# because Git before 2.38 reports a prune the lock blocked and still exits 0, so
+# two cases drive that shape explicitly on every Git version: the stale lock is
+# still recovered, and a blocked prune is never reported as a completed sync.
 set -u
 
 # shellcheck source=tests/lib.sh
@@ -175,6 +179,31 @@ if [ "$is_fetch" = 1 ]; then
     rm -f "$lock"
     exit 1
   fi
+fi
+exec "$real" "$@"
+SH
+  chmod +x "$1/git"
+}
+
+# git shim: reproduce the pre-2.38 Git behavior for a prune the packed-refs lock
+# blocked - the failure is reported on stderr and the process STILL exits 0. The
+# guard therefore has to decide on Git's message, not its status, or it never
+# fires at all on those hosts. Only a fetch facing an existing lock is faked;
+# once the lock is gone, the real git runs, so the recovery still has to be a
+# real one. This shim makes the case version-independent: modern Git exits 1 for
+# the same condition, so without it this behavior is untestable wherever the
+# suite happens to run a new enough Git.
+git_packed_refs_lock_error_with_zero_exit() {
+  cat > "$1/git" <<'SH'
+#!/usr/bin/env bash
+real=${REAL_GIT_FOR_TEST:?}
+dir=; is_fetch=0
+for a in "$@"; do [ "$a" = fetch ] && is_fetch=1; done
+prev=
+for a in "$@"; do [ "$prev" = -C ] && dir=$a; prev=$a; done
+if [ "$is_fetch" = 1 ] && [ -n "$dir" ] && [ -e "$dir/.git/packed-refs.lock" ]; then
+  echo "error: could not delete reference refs/remotes/origin/feature: Unable to create '$dir/.git/packed-refs.lock': File exists." >&2
+  exit 0
 fi
 exec "$real" "$@"
 SH
@@ -582,6 +611,62 @@ test_transient_packed_refs_lock_self_clears() {
   pass "a transient packed-refs.lock that self-clears is retried without a force-remove"
 }
 
+test_zero_exit_packed_refs_lock_still_recovers() {
+  local home fakebin clone out err
+  home=$(new_home)
+  fakebin="$home/fb-lockzero"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_packed_prunable "$home" lockzero)
+  plant_packed_refs_lock "$clone"
+  lsof_no_holder "$fakebin"           # provably no live holder
+  git_packed_refs_lock_error_with_zero_exit "$fakebin"
+  out="$home/out-lockzero"; err="$home/err-lockzero"
+
+  set +e
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" lockzero
+  set -e
+
+  assert_grep "removed provably-stale packed-refs lock" "$err" \
+    "zero-exit lock: a lock reported on a status-0 fetch never reached the guard"
+  assert_contains "$(cat "$out")" "lockzero: synced" "zero-exit lock: clone did not sync after recovery"
+  assert_grep "recovered: removed a stale packed-refs lock" "$out" \
+    "zero-exit lock: recovery summary not emitted on stdout"
+  assert_absent "$clone/.git/packed-refs.lock" "zero-exit lock: lock should be gone after removal"
+  [ "$(git -C "$clone" rev-parse HEAD)" = "$(git -C "$clone" rev-parse origin/main)" ] \
+    || fail "zero-exit lock: clone HEAD not at origin/main after recovery"
+  pass "a packed-refs lock reported on a status-0 fetch is still recovered"
+}
+
+test_zero_exit_packed_refs_lock_never_reports_a_silent_sync() {
+  local home fakebin clone out err before
+  home=$(new_home)
+  fakebin="$home/fb-lockzerolive"; rm -rf "$fakebin"; mkdir -p "$fakebin"
+  clone=$(build_packed_prunable "$home" lockzerolive)
+  plant_packed_refs_lock "$clone"
+  lsof_live_holder "$fakebin"         # a live process holds the lock
+  git_packed_refs_lock_error_with_zero_exit "$fakebin"
+  before=$(head_sha "$clone")
+  out="$home/out-lockzerolive"; err="$home/err-lockzerolive"
+
+  set +e
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRIES=2 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_RETRY_WAIT_SECS=0 \
+  FM_FLEET_SYNC_PACKED_REFS_LOCK_AGE_SECS=0 \
+    run_sync_guarded "$home" "$fakebin" "$out" "$err" lockzerolive
+  set -e
+
+  # The whole point of reading the message: a status-0 fetch whose prune the lock
+  # blocked must not be reported as a completed sync.
+  assert_contains "$(cat "$out")" "lockzerolive: skipped: fetch failed" \
+    "zero-exit lock: a blocked prune was reported as a completed sync"
+  assert_grep "is not provably stale" "$err" "zero-exit live lock: guard did not explain the refusal"
+  assert_present "$clone/.git/packed-refs.lock" "zero-exit live lock: lock must never be removed"
+  [ "$(head_sha "$clone")" = "$before" ] || fail "zero-exit live lock: clone was advanced despite the refusal"
+  pass "a status-0 fetch whose prune the lock blocked is never reported as synced"
+}
+
 test_non_signature_fetch_failure_is_not_retried() {
   local home fakebin clone out err
   home=$(new_home)
@@ -624,4 +709,6 @@ test_orphaned_stale_packed_refs_lock_recovers
 test_live_packed_refs_lock_is_never_removed
 test_live_git_cwd_in_clone_dir_blocks_removal
 test_transient_packed_refs_lock_self_clears
+test_zero_exit_packed_refs_lock_still_recovers
+test_zero_exit_packed_refs_lock_never_reports_a_silent_sync
 test_non_signature_fetch_failure_is_not_retried

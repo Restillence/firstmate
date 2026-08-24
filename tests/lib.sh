@@ -170,6 +170,46 @@ SH
   done
 }
 
+# fm_test_system_path_without <dir> <tool>...
+# Echoes a PATH made of the base system directories with the named tools
+# deliberately absent.
+# A fixture that has to present a host WITHOUT some tool cannot get there by
+# deleting its own stub: PATH lookup simply falls through to whatever the runner
+# installs in /usr/bin, so the identical fixture is a real test on a host that
+# lacks the tool and vacuous on a host that ships it. This mirrors the base
+# directories into <dir> as a symlink farm and leaves the named tools out of the
+# mirror, so the absence holds on every host.
+# The mirror source is the same FM_TEST_BASE_PATH the call sites read, because a
+# host that needs that override (NixOS, where /usr/bin holds only env and /bin
+# only sh) would otherwise get a near-empty farm with no bash, git, sed or grep.
+# A name carried by more than one of those directories resolves to the EARLIEST
+# one, exactly as PATH resolves it: the farm is linked back to front so the
+# highest-priority directory takes the final overwrite. Anything else would hand
+# a fixture a different binary than every fixture that reads the base path
+# directly, which is how an override gets silently defeated.
+fm_test_system_path_without() {
+  local dir=$1 source_dir tool i
+  local entries=()
+  local source_dirs=()
+  shift
+  mkdir -p "$dir" || return 1
+  IFS=: read -r -a source_dirs <<< "${FM_TEST_BASE_PATH:-/usr/bin:/bin:/usr/sbin:/sbin}"
+  for (( i = ${#source_dirs[@]} - 1; i >= 0; i-- )); do
+    source_dir=${source_dirs[i]}
+    [ -n "$source_dir" ] || continue
+    [ -d "$source_dir" ] || continue
+    entries=("$source_dir"/*)
+    # An unmatched glob stays literal; a dangling symlink is still a real entry,
+    # so test for expansion rather than for the first entry resolving.
+    [ "${entries[0]}" != "$source_dir/*" ] || continue
+    ln -sf "${entries[@]}" "$dir/" || return 1
+  done
+  for tool in "$@"; do
+    rm -f "$dir/$tool" || return 1
+  done
+  printf '%s\n' "$dir"
+}
+
 # fm_fake_version_tool <fakebin> <tool> <override-env-var> <default-version>
 # The stub answers `--version` with <override-env-var> when that variable is set
 # and non-empty, and with <default-version> otherwise; every other invocation
