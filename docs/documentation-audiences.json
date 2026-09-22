@@ -157,6 +157,30 @@
       "audience": "agent-runtime"
     },
     {
+      "path": ".agents/skills/jev/README.en.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/jev/README.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/jev/SKILL.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/jev/references/api-notes.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/jev/references/benchmark-jev-vs-mainmodel.md",
+      "audience": "agent-runtime"
+    },
+    {
+      "path": ".agents/skills/jev/references/showcase-taobao-comments.md",
+      "audience": "agent-runtime"
+    },
+    {
       "path": ".agents/skills/process-event-sources/SKILL.md",
       "audience": "agent-runtime"
     },
