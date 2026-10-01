@@ -993,7 +993,7 @@ async function replaceSession(previous, reason) {
   if (String(armed.details.message).includes("shutting down")) {
     throw new Error(`${reason} replacement still refused with shutting-down latch`);
   }
-  // Wait for the replacement's arm-log row, not the pid file the fixture
+  // Wait for the replacement arm-log row, not the pid file the fixture
   // writes earlier: the single-live-arm invariant below reads arm-log rows,
   // and on a loaded machine the row can lag the pid file.
   await waitFor(
@@ -1147,7 +1147,7 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-exit", {}, undefined, undefined, {});
-// Wait for a complete pid row, not for the file to exist: the fixture's
+// Wait for a complete pid row, not for the file to exist: the fixture
 // truncating redirect empties the pid file before it writes the pid, so on a
 // loaded machine an existence wait or a bare read can observe an empty pid.
 const pidFileText = () =>
@@ -1249,7 +1249,7 @@ const hooks = await mod.FmPrimaryWatchArm({
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-// Wait for a complete arm-log row, not for the file to exist: the fixture's
+// Wait for a complete arm-log row, not for the file to exist: the fixture
 // append creates the log before it writes the row, so on a loaded machine an
 // existence wait can pass while the log still reads empty.
 const armLog = () => (existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8") : "");
