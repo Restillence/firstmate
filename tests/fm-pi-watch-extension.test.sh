@@ -1147,27 +1147,44 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-exit", {}, undefined, undefined, {});
-for (let i = 0; i < 250 && !existsSync(process.env.FM_CHILD_PID_FILE); i += 1) {
+// Wait for a complete pid row, not for the file to exist: the fixture's
+// truncating redirect empties the pid file before it writes the pid, so on a
+// loaded machine an existence wait or a bare read can observe an empty pid.
+const pidFileText = () =>
+  existsSync(process.env.FM_CHILD_PID_FILE) ? readFileSync(process.env.FM_CHILD_PID_FILE, "utf8") : "";
+const childPid = () => {
+  const text = pidFileText();
+  return text.endsWith("\n") ? text.trim() : "";
+};
+for (let i = 0; i < 250 && childPid() === ""; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (!existsSync(process.env.FM_CHILD_PID_FILE)) throw new Error("arm child did not start");
-const firstChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+const firstChild = childPid();
+if (firstChild === "") {
+  throw new Error(
+    `timeout waiting for the arm child to write a complete pid row, got: ${JSON.stringify(pidFileText())}`,
+  );
+}
 await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
 await handlers.get("session_start")?.({ type: "session_start" }, {});
 await tool.execute("tool-call-replacement", {}, undefined, undefined, {});
-for (let i = 0; i < 250; i += 1) {
-  const currentChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
-  if (currentChild !== firstChild) break;
+const replacementPid = () => {
+  const pid = childPid();
+  return pid !== "" && pid !== firstChild ? pid : "";
+};
+for (let i = 0; i < 250 && replacementPid() === ""; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim() === firstChild) {
-  throw new Error("replacement arm child did not start");
+if (replacementPid() === "") {
+  throw new Error(
+    `timeout waiting for the replacement arm child to write a complete pid row differing from ${firstChild}, got: ${JSON.stringify(pidFileText())}`,
+  );
 }
 process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi process exit must run the watcher cleanup fallback"
+  [ "$status" -eq 0 ] || fail "Pi process exit must run the watcher cleanup fallback: $out"
   [ -z "$out" ] || fail "Pi process-exit cleanup test printed output: $out"
   pid=$(cat "$pid_file")
   i=0
