@@ -1232,14 +1232,18 @@ const hooks = await mod.FmPrimaryWatchArm({
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+// Wait for a complete arm-log row, not for the file to exist: the fixture's
+// append creates the log before it writes the row, so on a loaded machine an
+// existence wait can pass while the log still reads empty.
+const armLog = () => (existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8") : "");
+for (let i = 0; i < 250 && !armLog().endsWith("\n"); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (!existsSync(process.env.FM_ARM_LOG)) {
-  console.error("watch arm did not run");
+const text = armLog();
+if (!text.endsWith("\n")) {
+  console.error(`timeout waiting for the watch arm to write a complete arm-log row, got: ${JSON.stringify(text)}`);
   process.exit(1);
 }
-const text = readFileSync(process.env.FM_ARM_LOG, "utf8");
 const expectedRoot = realpathSync(process.env.WORKTREE);
 if (!text.includes(`home=${process.env.FM_HOME}`) || !text.includes(`root=${expectedRoot}`)) {
   console.error(text);
@@ -1248,7 +1252,7 @@ if (!text.includes(`home=${process.env.FM_HOME}`) || !text.includes(`root=${expe
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"
+  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must use FM_HOME state outside the repo root: $out"
   [ -z "$out" ] || fail "OpenCode effective-state test printed output: $out"
   pass "OpenCode watcher plugin uses the effective FM_HOME state"
 }
@@ -1282,14 +1286,15 @@ const hooks = await mod.FmPrimaryWatchArm({
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+const armLog = () => (existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8") : "");
+for (let i = 0; i < 250 && !armLog().endsWith("\n"); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (!existsSync(process.env.FM_ARM_LOG)) {
-  console.error("watch arm did not run");
+const text = armLog();
+if (!text.endsWith("\n")) {
+  console.error(`timeout waiting for the watch arm to write a complete arm-log row, got: ${JSON.stringify(text)}`);
   process.exit(1);
 }
-const text = readFileSync(process.env.FM_ARM_LOG, "utf8");
 if (!text.includes("poll=7")) {
   console.error(text);
   process.exit(1);
@@ -1297,7 +1302,7 @@ if (!text.includes("poll=7")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must source FM_HOME config outside the repo root"
+  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must source FM_HOME config outside the repo root: $out"
   [ -z "$out" ] || fail "OpenCode effective-config test printed output: $out"
   pass "OpenCode watcher plugin sources the effective config"
 }
