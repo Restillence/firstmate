@@ -996,10 +996,14 @@ async function replaceSession(previous, reason) {
   // Wait for the replacement's arm-log row, not the pid file the fixture
   // writes earlier: the single-live-arm invariant below reads arm-log rows,
   // and on a loaded machine the row can lag the pid file.
-  await waitFor(() => {
-    const live = liveArmPids();
-    return live.length === 1 && live[0] !== previousChild;
-  }, `${reason} replacement arm child to announce itself as the only live arm`);
+  await waitFor(
+    () => liveArmPids().some((pid) => pid !== previousChild),
+    `${reason} replacement arm child to announce itself in the arm log`,
+  );
+  const live = liveArmPids();
+  if (live.length !== 1) {
+    throw new Error(`${reason} expected exactly one live arm child, got ${live.join(",") || "(none)"}`);
+  }
   return next;
 }
 
