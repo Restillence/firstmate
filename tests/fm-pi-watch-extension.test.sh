@@ -930,7 +930,8 @@ function pidAlive(pid) {
 
 async function waitFor(pred, label, attempts = 250) {
   for (let i = 0; i < attempts; i += 1) {
-    if (pred()) return;
+    const result = pred();
+    if (result) return result;
     await new Promise((resolve) => setTimeout(resolve, 20));
   }
   throw new Error(`timeout waiting for ${label}`);
@@ -960,9 +961,14 @@ const first = await startup.getTool().execute("startup", {}, undefined, undefine
 if (!first.details?.ok || !String(first.details.message).includes("started Pi extension arm child")) {
   throw new Error(`startup arm failed: ${JSON.stringify(first.details)}`);
 }
-await waitFor(() => existsSync(process.env.FM_CHILD_PID_FILE), "startup child");
-const startupChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
-if (!pidAlive(startupChild)) throw new Error("startup child was not alive");
+// Wait for the arm-log announcement rather than the pid file: the fixture
+// writes the pid file before the arm-log row, and every liveness assertion
+// below counts arm-log rows, so a pid-file wait can pass while the row count
+// still reads stale on a loaded machine.
+const startupChild = await waitFor(() => {
+  const live = liveArmPids();
+  return live.length === 1 ? live[0] : false;
+}, "startup arm child to announce itself as the only live arm");
 const staleTool = startup.getTool();
 
 async function replaceSession(previous, reason) {
@@ -987,11 +993,13 @@ async function replaceSession(previous, reason) {
   if (String(armed.details.message).includes("shutting down")) {
     throw new Error(`${reason} replacement still refused with shutting-down latch`);
   }
-  await waitFor(() => {
-    if (!existsSync(process.env.FM_CHILD_PID_FILE)) return false;
-    const child = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
-    return child && child !== previousChild && pidAlive(child);
-  }, `${reason} replacement child`);
+  // Wait for the replacement arm-log row, not the pid file the fixture
+  // writes earlier: the single-live-arm invariant below reads arm-log rows,
+  // and on a loaded machine the row can lag the pid file.
+  await waitFor(
+    () => liveArmPids().some((pid) => pid !== previousChild),
+    `${reason} replacement arm child to announce itself in the arm log`,
+  );
   const live = liveArmPids();
   if (live.length !== 1) {
     throw new Error(`${reason} expected exactly one live arm child, got ${live.join(",") || "(none)"}`);
@@ -1012,10 +1020,9 @@ if (!sameInstanceArm.details?.ok || String(sameInstanceArm.details.message).incl
   throw new Error(`same-instance replacement arm failed: ${JSON.stringify(sameInstanceArm.details)}`);
 }
 await waitFor(() => {
-  if (!existsSync(process.env.FM_CHILD_PID_FILE)) return false;
-  const child = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
-  return child !== sameInstanceChild && pidAlive(child);
-}, "same-instance replacement child");
+  const live = liveArmPids();
+  return live.length === 1 && live[0] !== sameInstanceChild;
+}, "same-instance replacement arm child to announce itself as the only live arm");
 await waitFor(() => !pidAlive(sameInstanceChild), "same-instance previous child exit");
 if (liveArmPids().length !== 1) {
   throw new Error(`same-instance expected one live arm child, got ${liveArmPids().join(",")}`);
@@ -1056,7 +1063,7 @@ if (liveArmPids().length !== 0) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi session transitions must rearm through an explicit generation owner"
+  [ "$status" -eq 0 ] || fail "Pi session transitions must rearm through an explicit generation owner: $out"
   [ -z "$out" ] || fail "Pi session-transition generation owner test printed output: $out"
   pass "Pi session transitions use a generation owner across /new /resume /fork, stale callbacks, and quit"
 }
@@ -1140,27 +1147,44 @@ writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 const mod = await import(pathToFileURL(process.env.PLUGIN).href);
 mod.default(pi);
 await tool.execute("tool-call-exit", {}, undefined, undefined, {});
-for (let i = 0; i < 250 && !existsSync(process.env.FM_CHILD_PID_FILE); i += 1) {
+// Wait for a complete pid row, not for the file to exist: the fixture
+// truncating redirect empties the pid file before it writes the pid, so on a
+// loaded machine an existence wait or a bare read can observe an empty pid.
+const pidFileText = () =>
+  existsSync(process.env.FM_CHILD_PID_FILE) ? readFileSync(process.env.FM_CHILD_PID_FILE, "utf8") : "";
+const childPid = () => {
+  const text = pidFileText();
+  return text.endsWith("\n") ? text.trim() : "";
+};
+for (let i = 0; i < 250 && childPid() === ""; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (!existsSync(process.env.FM_CHILD_PID_FILE)) throw new Error("arm child did not start");
-const firstChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
+const firstChild = childPid();
+if (firstChild === "") {
+  throw new Error(
+    `timeout waiting for the arm child to write a complete pid row, got: ${JSON.stringify(pidFileText())}`,
+  );
+}
 await handlers.get("session_shutdown")?.({ type: "session_shutdown" }, {});
 await handlers.get("session_start")?.({ type: "session_start" }, {});
 await tool.execute("tool-call-replacement", {}, undefined, undefined, {});
-for (let i = 0; i < 250; i += 1) {
-  const currentChild = readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim();
-  if (currentChild !== firstChild) break;
+const replacementPid = () => {
+  const pid = childPid();
+  return pid !== "" && pid !== firstChild ? pid : "";
+};
+for (let i = 0; i < 250 && replacementPid() === ""; i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (readFileSync(process.env.FM_CHILD_PID_FILE, "utf8").trim() === firstChild) {
-  throw new Error("replacement arm child did not start");
+if (replacementPid() === "") {
+  throw new Error(
+    `timeout waiting for the replacement arm child to write a complete pid row differing from ${firstChild}, got: ${JSON.stringify(pidFileText())}`,
+  );
 }
 process.exit(0);
 EOF
 )
   status=$?
-  expect_code 0 "$status" "Pi process exit must run the watcher cleanup fallback"
+  [ "$status" -eq 0 ] || fail "Pi process exit must run the watcher cleanup fallback: $out"
   [ -z "$out" ] || fail "Pi process-exit cleanup test printed output: $out"
   pid=$(cat "$pid_file")
   i=0
@@ -1225,14 +1249,18 @@ const hooks = await mod.FmPrimaryWatchArm({
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+// Wait for a complete arm-log row, not for the file to exist: the fixture
+// append creates the log before it writes the row, so on a loaded machine an
+// existence wait can pass while the log still reads empty.
+const armLog = () => (existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8") : "");
+for (let i = 0; i < 250 && !armLog().endsWith("\n"); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (!existsSync(process.env.FM_ARM_LOG)) {
-  console.error("watch arm did not run");
+const text = armLog();
+if (!text.endsWith("\n")) {
+  console.error(`timeout waiting for the watch arm to write a complete arm-log row, got: ${JSON.stringify(text)}`);
   process.exit(1);
 }
-const text = readFileSync(process.env.FM_ARM_LOG, "utf8");
 const expectedRoot = realpathSync(process.env.WORKTREE);
 if (!text.includes(`home=${process.env.FM_HOME}`) || !text.includes(`root=${expectedRoot}`)) {
   console.error(text);
@@ -1241,7 +1269,7 @@ if (!text.includes(`home=${process.env.FM_HOME}`) || !text.includes(`root=${expe
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must use FM_HOME state outside the repo root"
+  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must use FM_HOME state outside the repo root: $out"
   [ -z "$out" ] || fail "OpenCode effective-state test printed output: $out"
   pass "OpenCode watcher plugin uses the effective FM_HOME state"
 }
@@ -1275,14 +1303,15 @@ const hooks = await mod.FmPrimaryWatchArm({
 });
 writeFileSync(`${process.env.FM_HOME}/state/.lock`, `${process.pid}\n`);
 await hooks.event({ event: { type: "session.idle", properties: { sessionID: "session-test" } } });
-for (let i = 0; i < 250 && !existsSync(process.env.FM_ARM_LOG); i += 1) {
+const armLog = () => (existsSync(process.env.FM_ARM_LOG) ? readFileSync(process.env.FM_ARM_LOG, "utf8") : "");
+for (let i = 0; i < 250 && !armLog().endsWith("\n"); i += 1) {
   await new Promise((resolve) => setTimeout(resolve, 20));
 }
-if (!existsSync(process.env.FM_ARM_LOG)) {
-  console.error("watch arm did not run");
+const text = armLog();
+if (!text.endsWith("\n")) {
+  console.error(`timeout waiting for the watch arm to write a complete arm-log row, got: ${JSON.stringify(text)}`);
   process.exit(1);
 }
-const text = readFileSync(process.env.FM_ARM_LOG, "utf8");
 if (!text.includes("poll=7")) {
   console.error(text);
   process.exit(1);
@@ -1290,7 +1319,7 @@ if (!text.includes("poll=7")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must source FM_HOME config outside the repo root"
+  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must source FM_HOME config outside the repo root: $out"
   [ -z "$out" ] || fail "OpenCode effective-config test printed output: $out"
   pass "OpenCode watcher plugin sources the effective config"
 }
@@ -2076,6 +2105,7 @@ printf 'watcher: started pid=1 (beacon fresh)\n'
 SH
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
+payload=$(cat 2>/dev/null || true)
 printf 'guard\n' >> "${FM_GUARD_LOG:?}"
 printf 'guard should not run\n' >&2
 exit 2
@@ -2147,8 +2177,13 @@ test_opencode_healthy_arm_output_does_not_suppress_guard() {
 printf 'args=%s\n' "$*" >> "${FM_ARM_LOG:?}"
 printf 'watcher: healthy pid=1 (beacon 0s)\n'
 SH
+  # Consume stdin exactly like the real bin/fm-turnend-guard.sh: the plugin
+  # writes the hook payload to the child's stdin right after spawn, and a guard
+  # that exits without reading it turns that write into an unhandled EPIPE on a
+  # loaded host where the child can die before the write flushes.
   cat > "$repo/bin/fm-turnend-guard.sh" <<'SH'
 #!/usr/bin/env bash
+payload=$(cat 2>/dev/null || true)
 printf 'guard\n' >> "${FM_GUARD_LOG:?}"
 printf 'guard ran after external healthy watcher\n' >&2
 exit 2
@@ -2202,7 +2237,7 @@ if (!promptBody.includes("TURN WOULD END BLIND")) {
 EOF
 )
   status=$?
-  expect_code 0 "$status" "OpenCode watch plugin must not treat external healthy output as an owned arm"
+  [ "$status" -eq 0 ] || fail "OpenCode watch plugin must not treat external healthy output as an owned arm: $out"
   [ -z "$out" ] || fail "OpenCode external-healthy test printed output: $out"
   pass "OpenCode healthy arm output does not suppress the turn-end guard"
 }
