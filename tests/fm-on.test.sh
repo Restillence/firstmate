@@ -11,7 +11,21 @@ TMP_ROOT=$(fm_test_tmproot fm-on)
 # and physicalize macOS's /var -> /private/var alias before transport validation.
 mkdir -p "$TMP_ROOT"
 TMP_ROOT=$(cd "$TMP_ROOT" && pwd -P)
-trap 'if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then kill "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" 2>/dev/null || true; fi; rm -rf -- "$TMP_ROOT"' EXIT
+# shellcheck source=bin/fm-remote-job-lib.sh
+. "$ROOT/bin/fm-remote-job-lib.sh"
+# A bare kill returns before the worker has exited, and a worker caught mid
+# heartbeat still publishes worker.ready into remote-jobs while rm -rf walks it,
+# which failed CI after every case had passed:
+#   rm: cannot remove '/tmp/fm-on.XXXXXX/remote-jobs': Directory not empty
+# worker.pid records the serving child, not its restart supervisor, so stop the
+# whole worker tree and wait for it to exit before removing the root.
+cleanup() {
+  if [ -f "$TMP_ROOT/remote-jobs/worker.pid" ]; then
+    fm_remote_job_stop_worker_tree "$(cat "$TMP_ROOT/remote-jobs/worker.pid")" || true
+  fi
+  rm -rf -- "$TMP_ROOT"
+}
+trap cleanup EXIT
 LOCAL_HOME="$TMP_ROOT/local-home"
 REMOTE_ROOT="$TMP_ROOT/remote-root"
 REMOTE_HOME="$TMP_ROOT/remote-home"
